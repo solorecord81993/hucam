@@ -190,6 +190,15 @@ function isAppleMobileDevice() {
   );
 }
 
+function inferFacingMode(label: string, fallback: FacingMode): FacingMode {
+  const normalized = label.toLowerCase();
+  if (/front|user|facetime/.test(normalized)) return "user";
+  if (/back|rear|environment|ultra|telephoto/.test(normalized)) {
+    return "environment";
+  }
+  return fallback;
+}
+
 function Icon({
   name,
   size = 24,
@@ -203,7 +212,8 @@ function Icon({
     | "close"
     | "chevronDown"
     | "chevronUp"
-    | "box";
+    | "box"
+    | "fullscreen";
   size?: number;
 }) {
   const paths = {
@@ -246,6 +256,9 @@ function Icon({
         <path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
         <rect height="8" rx="1.5" width="8" x="8" y="8" />
       </>
+    ),
+    fullscreen: (
+      <path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5" />
     ),
   };
 
@@ -306,6 +319,7 @@ function classifyPose(points: Landmark[]) {
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const cameraStageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const objectCanvasRef = useRef<HTMLCanvasElement>(null);
   const poseRef = useRef<PoseLandmarker | null>(null);
@@ -319,6 +333,7 @@ export default function Home() {
   const frameRef = useRef<number | null>(null);
   const activeRef = useRef(false);
   const facingRef = useRef<FacingMode>("user");
+  const selectedDeviceIdRef = useRef("");
   const mirrorRef = useRef(true);
   const skeletonRef = useRef(true);
   const objectsEnabledRef = useRef(true);
@@ -333,13 +348,15 @@ export default function Home() {
   const [skeleton, setSkeleton] = useState(true);
   const [objectsEnabled, setObjectsEnabled] = useState(true);
   const [facing, setFacing] = useState<FacingMode>("user");
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [status, setStatus] = useState<AppStatus>("idle");
   const [poseName, setPoseName] = useState("รอเริ่มตรวจจับ");
   const [fps, setFps] = useState(0);
   const [error, setError] = useState("");
   const [installOpen, setInstallOpen] = useState(false);
   const [standalone, setStandalone] = useState(false);
-  const [controlsHidden, setControlsHidden] = useState(false);
+  const [cleanView, setCleanView] = useState(false);
 
   useEffect(() => {
     const nav = navigator as Navigator & { standalone?: boolean };
@@ -717,22 +734,45 @@ export default function Home() {
   }, [clearCanvas, drawObjects, drawPose]);
 
   const openStream = useCallback(
-    async (mode: FacingMode) => {
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+    async (mode: FacingMode, deviceId?: string) => {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
-          facingMode: { ideal: mode },
+          ...(deviceId
+            ? { deviceId: { exact: deviceId } }
+            : { facingMode: { ideal: mode } }),
           width: { ideal: 1280 },
           height: { ideal: 720 },
           frameRate: { ideal: 30, max: 30 },
         },
       });
+
+      streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = stream;
       const video = videoRef.current;
       if (!video) return;
       video.srcObject = stream;
       await video.play();
+
+      const settings = stream.getVideoTracks()[0]?.getSettings();
+      const actualFacing =
+        settings?.facingMode === "user" ||
+        settings?.facingMode === "environment"
+          ? settings.facingMode
+          : mode;
+      facingRef.current = actualFacing;
+      setFacing(actualFacing);
+      mirrorRef.current = actualFacing === "user";
+      setMirror(actualFacing === "user");
+
+      const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(
+        (device) => device.kind === "videoinput",
+      );
+      setVideoDevices(inputs);
+
+      const activeDeviceId = settings?.deviceId || deviceId || "";
+      selectedDeviceIdRef.current = activeDeviceId;
+      setSelectedDeviceId(activeDeviceId);
     },
     [],
   );
@@ -754,6 +794,7 @@ export default function Home() {
     setPoseName("รอเริ่มตรวจจับ");
     setStatus("idle");
     setActive(false);
+    setCleanView(false);
   }, [clearCanvas, clearObjectCanvas]);
 
   const startCamera = useCallback(async () => {
@@ -765,7 +806,10 @@ export default function Home() {
     setError("");
     setStatus("camera");
     try {
-      await openStream(facingRef.current);
+      await openStream(
+        facingRef.current,
+        selectedDeviceIdRef.current || undefined,
+      );
       activeRef.current = true;
       setActive(true);
       setStatus("loading");
@@ -819,25 +863,81 @@ export default function Home() {
     stopCamera,
   ]);
 
-  const switchCamera = useCallback(async () => {
-    const next: FacingMode =
-      facingRef.current === "user" ? "environment" : "user";
-    facingRef.current = next;
-    setFacing(next);
-    mirrorRef.current = next === "user";
-    setMirror(next === "user");
-    if (!activeRef.current) return;
+  const cycleCamera = useCallback(async () => {
+    if (!activeRef.current || videoDevices.length < 2) {
+      const next: FacingMode =
+        facingRef.current === "user" ? "environment" : "user";
+      facingRef.current = next;
+      setFacing(next);
+      mirrorRef.current = next === "user";
+      setMirror(next === "user");
+      if (!activeRef.current) {
+        selectedDeviceIdRef.current = "";
+        setSelectedDeviceId("");
+        return;
+      }
+
+      setStatus("camera");
+      try {
+        await openStream(next);
+        previousPointsRef.current = null;
+        lastObjectDetectRef.current = 0;
+        runDetection();
+      } catch {
+        setError("สลับกล้องไม่สำเร็จ อุปกรณ์อาจมีกล้องให้เลือกเพียงตัวเดียว");
+      }
+      return;
+    }
+
+    const currentIndex = Math.max(
+      0,
+      videoDevices.findIndex(
+        (device) => device.deviceId === selectedDeviceIdRef.current,
+      ),
+    );
+    const nextDevice = videoDevices[(currentIndex + 1) % videoDevices.length];
+    const nextFacing = inferFacingMode(nextDevice.label, facingRef.current);
 
     setStatus("camera");
+    setError("");
     try {
-      await openStream(next);
+      await openStream(nextFacing, nextDevice.deviceId);
       previousPointsRef.current = null;
       lastObjectDetectRef.current = 0;
       runDetection();
     } catch {
-      setError("สลับกล้องไม่สำเร็จ อุปกรณ์อาจมีกล้องให้เลือกเพียงตัวเดียว");
+      setError("เปิดเลนส์นี้ไม่สำเร็จ กรุณาลองเลนส์ถัดไป");
     }
-  }, [openStream, runDetection]);
+  }, [openStream, runDetection, videoDevices]);
+
+  const enterCleanView = useCallback(async () => {
+    setCleanView(true);
+    try {
+      if (cameraStageRef.current?.requestFullscreen) {
+        await cameraStageRef.current.requestFullscreen();
+      }
+    } catch {
+      // iPhone Safari uses the full-viewport CSS fallback.
+    }
+  }, []);
+
+  const exitCleanView = useCallback(async () => {
+    setCleanView(false);
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+    } catch {
+      // The CSS view has already been restored.
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement) setCleanView(false);
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () =>
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
 
   useEffect(
     () => () => {
@@ -850,8 +950,18 @@ export default function Home() {
     [],
   );
 
+  const selectedCameraIndex = videoDevices.findIndex(
+    (device) => device.deviceId === selectedDeviceId,
+  );
+  const cameraButtonLabel =
+    videoDevices.length > 1 && selectedCameraIndex >= 0
+      ? `เลนส์ ${selectedCameraIndex + 1}/${videoDevices.length}`
+      : facing === "user"
+        ? "กล้องหน้า"
+        : "กล้องหลัง";
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${cleanView ? "is-clean-view" : ""}`}>
       <header className="app-header">
         <button
           aria-label="คำแนะนำการติดตั้ง"
@@ -880,7 +990,24 @@ export default function Home() {
         className="camera-shell"
         aria-label="พื้นที่ตรวจจับคน สัตว์ และต้นไม้"
       >
-        <div className={`camera-stage ${active ? "is-active" : ""}`}>
+        <div
+          aria-label={cleanView ? "แตะเพื่อออกจากเต็มจอ" : undefined}
+          className={`camera-stage ${active ? "is-active" : ""}`}
+          onClick={() => {
+            if (cleanView) void exitCleanView();
+          }}
+          onKeyDown={(event) => {
+            if (
+              cleanView &&
+              (event.key === "Enter" || event.key === " ")
+            ) {
+              void exitCleanView();
+            }
+          }}
+          ref={cameraStageRef}
+          role={cleanView ? "button" : undefined}
+          tabIndex={cleanView ? 0 : undefined}
+        >
           <video
             aria-label="ภาพจากกล้อง"
             className={mirror ? "is-mirrored" : ""}
@@ -928,23 +1055,19 @@ export default function Home() {
             </div>
           )}
 
-          <div
-            className={`control-dock ${controlsHidden ? "is-collapsed" : ""}`}
-          >
+          <div className="control-dock">
             <button
-              aria-expanded={!controlsHidden}
-              aria-label={
-                controlsHidden ? "แสดงแถบเครื่องมือ" : "ซ่อนแถบเครื่องมือ"
-              }
+              aria-label="เข้าโหมดเต็มจอ"
               className="dock-visibility-toggle"
-              onClick={() => setControlsHidden((value) => !value)}
+              disabled={!active}
+              onClick={(event) => {
+                event.stopPropagation();
+                void enterCleanView();
+              }}
               type="button"
             >
-              <Icon
-                name={controlsHidden ? "chevronUp" : "chevronDown"}
-                size={20}
-              />
-              <span>{controlsHidden ? "แสดงเครื่องมือ" : "ซ่อน"}</span>
+              <Icon name="fullscreen" size={19} />
+              <span>เต็มจอ</span>
             </button>
 
             <button
@@ -972,9 +1095,9 @@ export default function Home() {
                 <Icon name="flip" />
                 <span>กระจก</span>
               </button>
-              <button onClick={switchCamera} type="button">
+              <button onClick={cycleCamera} type="button">
                 <Icon name="camera" />
-                <span>{facing === "user" ? "กล้องหน้า" : "กล้องหลัง"}</span>
+                <span>{cameraButtonLabel}</span>
               </button>
               <button
                 aria-pressed={skeleton}
