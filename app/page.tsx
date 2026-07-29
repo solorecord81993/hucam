@@ -38,6 +38,12 @@ type ObjectDetection = {
   }>;
 };
 
+type SegmentationMask = {
+  width: number;
+  height: number;
+  getAsFloat32Array: () => Float32Array;
+};
+
 const POSE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
@@ -62,6 +68,8 @@ const LIVING_OBJECT_CATEGORY_SET = new Set(LIVING_OBJECT_CATEGORIES);
 const OBJECT_DETECTION_INTERVAL_MS = 300;
 const PERSON_CONFIRMATION_SCORE = 0.45;
 const PERSON_CONFIRMATION_WINDOW_MS = 800;
+const PERSON_MASK_UPDATE_INTERVAL_MS = 100;
+const PERSON_MASK_THRESHOLD = 0.5;
 
 const THAI_OBJECT_NAMES: Record<string, string> = {
   person: "คน",
@@ -344,6 +352,8 @@ export default function Home() {
   const lastObjectDetectRef = useRef(0);
   const lastObjectFoundRef = useRef(0);
   const lastPersonFoundRef = useRef(0);
+  const personMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastPersonMaskUpdateRef = useRef(0);
   const fpsWindowRef = useRef({ started: 0, frames: 0 });
 
   const [active, setActive] = useState(false);
@@ -404,7 +414,7 @@ export default function Home() {
           minPoseDetectionConfidence: 0.55,
           minPosePresenceConfidence: 0.55,
           minTrackingConfidence: 0.55,
-          outputSegmentationMasks: false,
+          outputSegmentationMasks: true,
         });
 
       try {
@@ -467,6 +477,8 @@ export default function Home() {
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+    personMaskCanvasRef.current = null;
+    lastPersonMaskUpdateRef.current = 0;
   }, []);
 
   const clearObjectCanvas = useCallback(() => {
@@ -476,7 +488,11 @@ export default function Home() {
   }, []);
 
   const drawPose = useCallback(
-    (rawPoints: Landmark[]) => {
+    (
+      rawPoints: Landmark[],
+      personMask: SegmentationMask | undefined,
+      now: number,
+    ) => {
       const canvas = canvasRef.current;
       const video = videoRef.current;
       if (!canvas || !video || !video.videoWidth || !video.videoHeight) return;
@@ -523,6 +539,89 @@ export default function Home() {
       const renderedHeight = video.videoHeight * scale;
       const offsetX = (cssWidth - renderedWidth) / 2;
       const offsetY = (cssHeight - renderedHeight) / 2;
+
+      if (
+        personMask &&
+        now - lastPersonMaskUpdateRef.current >=
+          PERSON_MASK_UPDATE_INTERVAL_MS
+      ) {
+        const width = personMask.width;
+        const height = personMask.height;
+        const confidence = personMask.getAsFloat32Array();
+        let maskCanvas = personMaskCanvasRef.current;
+        if (
+          !maskCanvas ||
+          maskCanvas.width !== width ||
+          maskCanvas.height !== height
+        ) {
+          const nextMaskCanvas = document.createElement("canvas");
+          nextMaskCanvas.width = width;
+          nextMaskCanvas.height = height;
+          personMaskCanvasRef.current = nextMaskCanvas;
+          maskCanvas = nextMaskCanvas;
+        }
+
+        const maskContext = maskCanvas.getContext("2d");
+        if (maskContext && confidence.length >= width * height) {
+          const maskImage = maskContext.createImageData(width, height);
+          const pixels = maskImage.data;
+          const edgeRadius = 2;
+
+          for (let index = 0; index < width * height; index += 1) {
+            const value = confidence[index];
+            if (value < PERSON_MASK_THRESHOLD) continue;
+
+            const x = index % width;
+            const y = Math.floor(index / width);
+            const onEdge =
+              x < edgeRadius ||
+              y < edgeRadius ||
+              x >= width - edgeRadius ||
+              y >= height - edgeRadius ||
+              confidence[index - edgeRadius] < PERSON_MASK_THRESHOLD ||
+              confidence[index + edgeRadius] < PERSON_MASK_THRESHOLD ||
+              confidence[index - edgeRadius * width] <
+                PERSON_MASK_THRESHOLD ||
+              confidence[index + edgeRadius * width] <
+                PERSON_MASK_THRESHOLD;
+            const pixel = index * 4;
+
+            if (onEdge) {
+              pixels[pixel] = 185;
+              pixels[pixel + 1] = 255;
+              pixels[pixel + 2] = 74;
+              pixels[pixel + 3] = 235;
+            } else {
+              pixels[pixel] = 57;
+              pixels[pixel + 1] = 231;
+              pixels[pixel + 2] = 255;
+              pixels[pixel + 3] = Math.round(42 + Math.min(1, value) * 38);
+            }
+          }
+
+          maskContext.putImageData(maskImage, 0, 0);
+          lastPersonMaskUpdateRef.current = now;
+        }
+      }
+
+      const maskCanvas = personMaskCanvasRef.current;
+      if (maskCanvas) {
+        context.save();
+        context.imageSmoothingEnabled = true;
+        if (mirrorRef.current) {
+          context.translate(cssWidth, 0);
+          context.scale(-1, 1);
+        }
+        context.drawImage(
+          maskCanvas,
+          offsetX,
+          offsetY,
+          renderedWidth,
+          renderedHeight,
+        );
+        context.restore();
+      }
+
       const pointToCanvas = (point: Landmark) => ({
         x:
           (mirrorRef.current ? 1 - point.x : point.x) * renderedWidth +
@@ -613,6 +712,9 @@ export default function Home() {
       const box = detection.boundingBox;
       const category = detection.categories?.[0];
       if (!box || !category) return;
+      const rawName =
+        category.categoryName || category.displayName || "object";
+      if (rawName.toLowerCase() === "person") return;
 
       const sourceX = mirrorRef.current
         ? video.videoWidth - box.originX - box.width
@@ -621,8 +723,6 @@ export default function Home() {
       const y = box.originY * scale + offsetY;
       const width = box.width * scale;
       const height = box.height * scale;
-      const rawName =
-        category.categoryName || category.displayName || "object";
       const translatedName = THAI_OBJECT_NAMES[rawName.toLowerCase()] || rawName;
       const confidence = Math.round((category.score ?? 0) * 100);
       const label = `${translatedName}  ${confidence}%`;
@@ -714,26 +814,33 @@ export default function Home() {
         lastDetectRef.current = now;
         try {
           const result = pose.detectForVideo(video, now);
-          const points = result.landmarks?.[0] as Landmark[] | undefined;
-          const personRecentlyConfirmed =
-            !objectDetector ||
-            now - lastPersonFoundRef.current <=
-              PERSON_CONFIRMATION_WINDOW_MS;
-          if (points?.length && personRecentlyConfirmed) {
-            drawPose(points);
-            setStatus("tracking");
-          } else {
-            clearCanvas();
-            previousPointsRef.current = null;
-            setPoseName(
-              points?.length ? "ยังไม่ยืนยันว่าเป็นคน" : "ยังไม่พบคน",
-            );
-            setStatus(
-              objectsEnabledRef.current &&
-                now - lastObjectFoundRef.current < 600
-                ? "object"
-                : "lost",
-            );
+          try {
+            const points = result.landmarks?.[0] as Landmark[] | undefined;
+            const personMask = result.segmentationMasks?.[0] as
+              | SegmentationMask
+              | undefined;
+            const personRecentlyConfirmed =
+              !objectDetector ||
+              now - lastPersonFoundRef.current <=
+                PERSON_CONFIRMATION_WINDOW_MS;
+            if (points?.length && personRecentlyConfirmed) {
+              drawPose(points, personMask, now);
+              setStatus("tracking");
+            } else {
+              clearCanvas();
+              previousPointsRef.current = null;
+              setPoseName(
+                points?.length ? "ยังไม่ยืนยันว่าเป็นคน" : "ยังไม่พบคน",
+              );
+              setStatus(
+                objectsEnabledRef.current &&
+                  now - lastObjectFoundRef.current < 600
+                  ? "object"
+                  : "lost",
+              );
+            }
+          } finally {
+            (result as { close?: () => void }).close?.();
           }
 
           const window = fpsWindowRef.current;
@@ -1060,7 +1167,7 @@ export default function Home() {
                 <Icon name="body" size={74} />
               </span>
               <h1>มองเห็นสิ่งมีชีวิต<br />แบบเรียลไทม์</h1>
-              <p>ตีกรอบเฉพาะคน สัตว์ และต้นไม้ พร้อมโครงกระดูก</p>
+              <p>คนเป็นเงาโปร่งแสงพร้อมโครงกระดูก สัตว์เป็นกรอบสี่เหลี่ยม</p>
             </div>
           )}
 
