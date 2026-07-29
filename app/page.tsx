@@ -595,6 +595,7 @@ export default function Home() {
       const pose = poseRef.current;
       const objectDetector = objectDetectorRef.current;
       const now = performance.now();
+      let processedObjectFrame = false;
 
       if (
         video &&
@@ -604,6 +605,7 @@ export default function Home() {
         now - lastObjectDetectRef.current >= 220
       ) {
         lastObjectDetectRef.current = now;
+        processedObjectFrame = true;
         try {
           const result = objectDetector.detectForVideo(video, now);
           drawObjects(result.detections as ObjectDetection[]);
@@ -615,6 +617,7 @@ export default function Home() {
       if (
         video &&
         pose &&
+        !processedObjectFrame &&
         video.readyState >= 2 &&
         now - lastDetectRef.current >= 50
       ) {
