@@ -59,6 +59,40 @@ button:focus-visible {
     env(safe-area-inset-left);
 }
 
+.app-shell.is-clean-view {
+  display: block;
+  min-height: 0;
+  padding: 0;
+}
+
+.app-shell.is-clean-view .app-header,
+.app-shell.is-clean-view .status-pill,
+.app-shell.is-clean-view .pose-card,
+.app-shell.is-clean-view .error-toast,
+.app-shell.is-clean-view .control-dock,
+.app-shell.is-clean-view .install-hint {
+  display: none;
+}
+
+.app-shell.is-clean-view .camera-shell {
+  height: 100dvh;
+  padding: 0;
+}
+
+.app-shell.is-clean-view .camera-stage {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+  height: 100dvh;
+  min-height: 0;
+  touch-action: manipulation;
+}
+
+.app-shell.is-clean-view .camera-stage::after {
+  display: none;
+}
+
 .app-header {
   align-items: center;
   display: flex;
@@ -395,6 +429,11 @@ button:focus-visible {
 
 .dock-visibility-toggle:active {
   transform: scale(0.97);
+}
+
+.dock-visibility-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
 }
 
 .control-dock.is-collapsed {
