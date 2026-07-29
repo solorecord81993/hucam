@@ -44,6 +44,23 @@ const POSE_MODEL_URL =
 const OBJECT_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-tasks/object_detector/efficientdet_lite0_uint8.tflite";
 
+const LIVING_OBJECT_CATEGORIES = [
+  "person",
+  "bird",
+  "cat",
+  "dog",
+  "horse",
+  "sheep",
+  "cow",
+  "elephant",
+  "bear",
+  "zebra",
+  "giraffe",
+  "potted plant",
+];
+const LIVING_OBJECT_CATEGORY_SET = new Set(LIVING_OBJECT_CATEGORIES);
+const OBJECT_DETECTION_INTERVAL_MS = 300;
+
 const THAI_OBJECT_NAMES: Record<string, string> = {
   person: "คน",
   bicycle: "จักรยาน",
@@ -159,10 +176,10 @@ const CONNECTIONS: Array<[number, number]> = [
 const STATUS_COPY: Record<AppStatus, string> = {
   idle: "พร้อมเริ่มกล้อง",
   camera: "เปิดกล้องแล้ว",
-  loading: "กำลังเตรียม AI ตรวจจับคนและวัตถุ",
+  loading: "กำลังเตรียม AI ตรวจจับสิ่งมีชีวิต",
   tracking: "ตรวจพบท่าทาง",
-  object: "ตรวจพบวัตถุ",
-  lost: "กำลังมองหาคนและวัตถุ",
+  object: "ตรวจพบสิ่งมีชีวิต",
+  lost: "กำลังมองหาคน สัตว์ และต้นไม้",
   error: "เปิดกล้องไม่สำเร็จ",
 };
 
@@ -402,6 +419,7 @@ export default function Home() {
           displayNamesLocale: "en",
           maxResults: 12,
           scoreThreshold: 0.3,
+          categoryAllowlist: LIVING_OBJECT_CATEGORIES,
         });
 
       if (isAppleMobileDevice()) {
@@ -634,15 +652,21 @@ export default function Home() {
         objectDetector &&
         objectsEnabledRef.current &&
         video.readyState >= 2 &&
-        now - lastObjectDetectRef.current >= 220
+        now - lastObjectDetectRef.current >= OBJECT_DETECTION_INTERVAL_MS
       ) {
         lastObjectDetectRef.current = now;
         processedObjectFrame = true;
         try {
           const result = objectDetector.detectForVideo(video, now);
-          const detections = result.detections as ObjectDetection[];
-          drawObjects(detections);
-          if (detections.length > 0) {
+          const livingDetections = (
+            result.detections as ObjectDetection[]
+          ).filter((detection) => {
+            const name =
+              detection.categories?.[0]?.categoryName?.toLowerCase() || "";
+            return LIVING_OBJECT_CATEGORY_SET.has(name);
+          });
+          drawObjects(livingDetections);
+          if (livingDetections.length > 0) {
             lastObjectFoundRef.current = now;
             setStatus("object");
           }
@@ -745,17 +769,17 @@ export default function Home() {
       activeRef.current = true;
       setActive(true);
       setStatus("loading");
-      setPoseName("กำลังโหลด AI ตรวจจับวัตถุ");
+      setPoseName("กำลังโหลด AI ตรวจจับสิ่งมีชีวิต");
 
       let objectReady = false;
       try {
         await ensureObjectDetector();
         objectReady = true;
         if (!activeRef.current) return;
-        setPoseName("AI วัตถุพร้อมแล้ว");
+        setPoseName("AI สิ่งมีชีวิตพร้อมแล้ว");
         runDetection();
       } catch {
-        setError("AI วัตถุโหลดไม่สำเร็จ กำลังเปิดโครงร่างแทน");
+        setError("AI สิ่งมีชีวิตโหลดไม่สำเร็จ กำลังเปิดโครงร่างแทน");
       }
 
       if (!activeRef.current) return;
@@ -769,7 +793,9 @@ export default function Home() {
       }
 
       if (!activeRef.current) return;
-      setPoseName(poseRef.current ? "กำลังมองหาคน" : "AI วัตถุพร้อมใช้งาน");
+      setPoseName(
+        poseRef.current ? "กำลังมองหาคน" : "AI สิ่งมีชีวิตพร้อมใช้งาน",
+      );
       setStatus("lost");
       runDetection();
     } catch (cameraError) {
@@ -838,7 +864,7 @@ export default function Home() {
           </span>
           <span className="brand-copy">
             <strong>Pose + Objects</strong>
-            <small>ตรวจคนและวัตถุจากกล้อง</small>
+            <small>ตรวจคน สัตว์ และต้นไม้จากกล้อง</small>
           </span>
         </button>
 
@@ -850,7 +876,10 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="camera-shell" aria-label="พื้นที่ตรวจจับคนและวัตถุ">
+      <section
+        className="camera-shell"
+        aria-label="พื้นที่ตรวจจับคน สัตว์ และต้นไม้"
+      >
         <div className={`camera-stage ${active ? "is-active" : ""}`}>
           <video
             aria-label="ภาพจากกล้อง"
@@ -875,8 +904,8 @@ export default function Home() {
               <span className="empty-body" aria-hidden="true">
                 <Icon name="body" size={74} />
               </span>
-              <h1>มองเห็นคนและวัตถุ<br />แบบเรียลไทม์</h1>
-              <p>เห็นทั้งโครงกระดูก กรอบวัตถุ และชื่อสิ่งของ</p>
+              <h1>มองเห็นสิ่งมีชีวิต<br />แบบเรียลไทม์</h1>
+              <p>ตีกรอบเฉพาะคน สัตว์ และต้นไม้ พร้อมโครงกระดูก</p>
             </div>
           )}
 
@@ -977,7 +1006,7 @@ export default function Home() {
                 type="button"
               >
                 <Icon name="box" />
-                <span>วัตถุ</span>
+                <span>สิ่งมีชีวิต</span>
               </button>
             </div>
           </div>
