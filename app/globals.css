@@ -199,6 +199,10 @@ button:focus-visible {
   z-index: 2;
 }
 
+.camera-stage canvas.object-canvas {
+  z-index: 3;
+}
+
 .empty-state {
   align-items: center;
   display: flex;
@@ -454,7 +458,7 @@ button:focus-visible {
 .control-row {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .control-row button {
