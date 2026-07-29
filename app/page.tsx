@@ -8,7 +8,14 @@ import {
 } from "@mediapipe/tasks-vision";
 
 type FacingMode = "user" | "environment";
-type AppStatus = "idle" | "camera" | "loading" | "tracking" | "lost" | "error";
+type AppStatus =
+  | "idle"
+  | "camera"
+  | "loading"
+  | "tracking"
+  | "object"
+  | "lost"
+  | "error";
 
 type Landmark = {
   x: number;
@@ -154,9 +161,17 @@ const STATUS_COPY: Record<AppStatus, string> = {
   camera: "เปิดกล้องแล้ว",
   loading: "กำลังเตรียม AI ตรวจจับคนและวัตถุ",
   tracking: "ตรวจพบท่าทาง",
-  lost: "ขยับให้เห็นร่างกายในกรอบ",
+  object: "ตรวจพบวัตถุ",
+  lost: "กำลังมองหาคนและวัตถุ",
   error: "เปิดกล้องไม่สำเร็จ",
 };
+
+function isAppleMobileDevice() {
+  return (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+  );
+}
 
 function Icon({
   name,
@@ -280,6 +295,9 @@ export default function Home() {
   const posePromiseRef = useRef<Promise<PoseLandmarker> | null>(null);
   const objectDetectorRef = useRef<ObjectDetector | null>(null);
   const objectPromiseRef = useRef<Promise<ObjectDetector> | null>(null);
+  const visionPromiseRef = useRef<ReturnType<
+    typeof FilesetResolver.forVisionTasks
+  > | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const frameRef = useRef<number | null>(null);
   const activeRef = useRef(false);
@@ -290,6 +308,7 @@ export default function Home() {
   const previousPointsRef = useRef<Landmark[] | null>(null);
   const lastDetectRef = useRef(0);
   const lastObjectDetectRef = useRef(0);
+  const lastObjectFoundRef = useRef(0);
   const fpsWindowRef = useRef({ started: 0, frames: 0 });
 
   const [active, setActive] = useState(false);
@@ -319,14 +338,24 @@ export default function Home() {
     return () => window.clearTimeout(standaloneTimer);
   }, []);
 
+  const ensureVision = useCallback(() => {
+    if (!visionPromiseRef.current) {
+      visionPromiseRef.current = FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.0/wasm",
+      ).catch((visionError) => {
+        visionPromiseRef.current = null;
+        throw visionError;
+      });
+    }
+    return visionPromiseRef.current;
+  }, []);
+
   const ensurePose = useCallback(async () => {
     if (poseRef.current) return poseRef.current;
     if (posePromiseRef.current) return posePromiseRef.current;
 
     posePromiseRef.current = (async () => {
-      const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.0/wasm",
-      );
+      const vision = await ensureVision();
       const create = (delegate: "GPU" | "CPU") =>
         PoseLandmarker.createFromOptions(vision, {
           baseOptions: {
@@ -355,16 +384,14 @@ export default function Home() {
       posePromiseRef.current = null;
       throw modelError;
     }
-  }, []);
+  }, [ensureVision]);
 
   const ensureObjectDetector = useCallback(async () => {
     if (objectDetectorRef.current) return objectDetectorRef.current;
     if (objectPromiseRef.current) return objectPromiseRef.current;
 
     objectPromiseRef.current = (async () => {
-      const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.0/wasm",
-      );
+      const vision = await ensureVision();
       const create = (delegate: "GPU" | "CPU") =>
         ObjectDetector.createFromOptions(vision, {
           baseOptions: {
@@ -373,9 +400,14 @@ export default function Home() {
           },
           runningMode: "VIDEO",
           displayNamesLocale: "en",
-          maxResults: 10,
-          scoreThreshold: 0.42,
+          maxResults: 12,
+          scoreThreshold: 0.3,
         });
+
+      if (isAppleMobileDevice()) {
+        objectDetectorRef.current = await create("CPU");
+        return objectDetectorRef.current;
+      }
 
       try {
         objectDetectorRef.current = await create("GPU");
@@ -391,7 +423,7 @@ export default function Home() {
       objectPromiseRef.current = null;
       throw modelError;
     }
-  }, []);
+  }, [ensureVision]);
 
   const clearCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -608,7 +640,12 @@ export default function Home() {
         processedObjectFrame = true;
         try {
           const result = objectDetector.detectForVideo(video, now);
-          drawObjects(result.detections as ObjectDetection[]);
+          const detections = result.detections as ObjectDetection[];
+          drawObjects(detections);
+          if (detections.length > 0) {
+            lastObjectFoundRef.current = now;
+            setStatus("object");
+          }
         } catch {
           // A transient frame decode error is safe to ignore.
         }
@@ -632,7 +669,9 @@ export default function Home() {
             clearCanvas();
             previousPointsRef.current = null;
             setPoseName("ยังไม่พบคน");
-            setStatus("lost");
+            setStatus(
+              now - lastObjectFoundRef.current < 600 ? "object" : "lost",
+            );
           }
 
           const window = fpsWindowRef.current;
@@ -684,6 +723,7 @@ export default function Home() {
     previousPointsRef.current = null;
     fpsWindowRef.current = { started: 0, frames: 0 };
     lastObjectDetectRef.current = 0;
+    lastObjectFoundRef.current = 0;
     clearCanvas();
     clearObjectCanvas();
     setFps(0);
@@ -705,8 +745,32 @@ export default function Home() {
       activeRef.current = true;
       setActive(true);
       setStatus("loading");
-      await Promise.all([ensurePose(), ensureObjectDetector()]);
+      setPoseName("กำลังโหลด AI ตรวจจับวัตถุ");
+
+      let objectReady = false;
+      try {
+        await ensureObjectDetector();
+        objectReady = true;
+        if (!activeRef.current) return;
+        setPoseName("AI วัตถุพร้อมแล้ว");
+        runDetection();
+      } catch {
+        setError("AI วัตถุโหลดไม่สำเร็จ กำลังเปิดโครงร่างแทน");
+      }
+
       if (!activeRef.current) return;
+      setPoseName("กำลังโหลด AI โครงร่าง");
+
+      try {
+        await ensurePose();
+      } catch (poseError) {
+        if (!objectReady) throw poseError;
+        setError((current) => current || "AI โครงร่างโหลดไม่สำเร็จ");
+      }
+
+      if (!activeRef.current) return;
+      setPoseName(poseRef.current ? "กำลังมองหาคน" : "AI วัตถุพร้อมใช้งาน");
+      setStatus("lost");
       runDetection();
     } catch (cameraError) {
       stopCamera();
