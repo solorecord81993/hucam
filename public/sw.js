@@ -1,4 +1,4 @@
-const CACHE_NAME = "hucam-living-v3";
+const CACHE_NAME = "hucam-lenses-v4";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/icon.svg", "/icon-maskable.svg"];
 
 self.addEventListener("install", (event) => {
