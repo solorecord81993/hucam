@@ -1,0 +1,638 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
+
+type FacingMode = "user" | "environment";
+type AppStatus = "idle" | "camera" | "loading" | "tracking" | "lost" | "error";
+
+type Landmark = {
+  x: number;
+  y: number;
+  z?: number;
+  visibility?: number;
+};
+
+const MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
+
+const CONNECTIONS: Array<[number, number]> = [
+  [0, 7],
+  [0, 8],
+  [7, 11],
+  [8, 12],
+  [11, 12],
+  [11, 13],
+  [13, 15],
+  [15, 17],
+  [15, 19],
+  [15, 21],
+  [12, 14],
+  [14, 16],
+  [16, 18],
+  [16, 20],
+  [16, 22],
+  [11, 23],
+  [12, 24],
+  [23, 24],
+  [23, 25],
+  [25, 27],
+  [27, 29],
+  [29, 31],
+  [24, 26],
+  [26, 28],
+  [28, 30],
+  [30, 32],
+];
+
+const STATUS_COPY: Record<AppStatus, string> = {
+  idle: "พร้อมเริ่มกล้อง",
+  camera: "เปิดกล้องแล้ว",
+  loading: "กำลังเตรียม AI ตรวจจับท่าทาง",
+  tracking: "ตรวจพบท่าทาง",
+  lost: "ขยับให้เห็นร่างกายในกรอบ",
+  error: "เปิดกล้องไม่สำเร็จ",
+};
+
+function Icon({
+  name,
+  size = 24,
+}: {
+  name: "camera" | "flip" | "body" | "shield" | "home" | "close";
+  size?: number;
+}) {
+  const paths = {
+    camera: (
+      <>
+        <path d="M8.5 7 10 4h4l1.5 3H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3.5Z" />
+        <circle cx="12" cy="13" r="4" />
+      </>
+    ),
+    flip: (
+      <>
+        <path d="M7 7h10l-2.5-2.5M17 17H7l2.5 2.5" />
+        <path d="M19 9a7 7 0 0 1 .3 6M5 15A7 7 0 0 1 5.3 9" />
+      </>
+    ),
+    body: (
+      <>
+        <circle cx="12" cy="4.5" r="2" />
+        <path d="m12 7 0 6m0-3-4-1.5M12 10l4-1.5M12 13l-3 6M12 13l3 6" />
+        <circle cx="8" cy="8.5" r=".8" />
+        <circle cx="16" cy="8.5" r=".8" />
+        <circle cx="9" cy="19" r=".8" />
+        <circle cx="15" cy="19" r=".8" />
+      </>
+    ),
+    shield: (
+      <path d="M12 3 20 6v5c0 5.1-3.4 8.5-8 10-4.6-1.5-8-4.9-8-10V6l8-3Zm-3 9 2 2 4-5" />
+    ),
+    home: (
+      <>
+        <path d="m3 11 9-8 9 8" />
+        <path d="M5 10v10h14V10M9 20v-6h6v6" />
+      </>
+    ),
+    close: <path d="m6 6 12 12M18 6 6 18" />,
+  };
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="ui-icon"
+      fill="none"
+      height={size}
+      viewBox="0 0 24 24"
+      width={size}
+    >
+      <g
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
+      >
+        {paths[name]}
+      </g>
+    </svg>
+  );
+}
+
+function angle(a: Landmark, b: Landmark, c: Landmark) {
+  const ab = { x: a.x - b.x, y: a.y - b.y };
+  const cb = { x: c.x - b.x, y: c.y - b.y };
+  const dot = ab.x * cb.x + ab.y * cb.y;
+  const length = Math.hypot(ab.x, ab.y) * Math.hypot(cb.x, cb.y);
+  if (!length) return 180;
+  return (Math.acos(Math.max(-1, Math.min(1, dot / length))) * 180) / Math.PI;
+}
+
+function classifyPose(points: Landmark[]) {
+  if (points.length < 33) return "กำลังอ่านท่าทาง";
+  const visible = (index: number) => (points[index]?.visibility ?? 1) > 0.55;
+  const required = [11, 12, 15, 16, 23, 24, 25, 26, 27, 28];
+  if (!required.every(visible)) return "เห็นร่างกายไม่ครบ";
+
+  const shoulderY = (points[11].y + points[12].y) / 2;
+  const handsAbove = points[15].y < shoulderY && points[16].y < shoulderY;
+  if (handsAbove) return "ยกแขนขึ้น";
+
+  const shoulderSpan = Math.abs(points[11].x - points[12].x);
+  const wristSpan = Math.abs(points[15].x - points[16].x);
+  const wristsLevel =
+    Math.abs(points[15].y - shoulderY) < 0.13 &&
+    Math.abs(points[16].y - shoulderY) < 0.13;
+  if (wristsLevel && wristSpan > shoulderSpan * 2.1) return "กางแขน";
+
+  const leftKnee = angle(points[23], points[25], points[27]);
+  const rightKnee = angle(points[24], points[26], points[28]);
+  if (leftKnee < 135 && rightKnee < 135) return "ย่อเข่า";
+  if (leftKnee < 125 || rightKnee < 125) return "ก้าวหรือยกขา";
+
+  return "ยืน";
+}
+
+export default function Home() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const poseRef = useRef<PoseLandmarker | null>(null);
+  const posePromiseRef = useRef<Promise<PoseLandmarker> | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const activeRef = useRef(false);
+  const facingRef = useRef<FacingMode>("user");
+  const previousPointsRef = useRef<Landmark[] | null>(null);
+  const lastDetectRef = useRef(0);
+  const fpsWindowRef = useRef({ started: 0, frames: 0 });
+
+  const [active, setActive] = useState(false);
+  const [mirror, setMirror] = useState(true);
+  const [skeleton, setSkeleton] = useState(true);
+  const [facing, setFacing] = useState<FacingMode>("user");
+  const [status, setStatus] = useState<AppStatus>("idle");
+  const [poseName, setPoseName] = useState("รอเริ่มตรวจจับ");
+  const [fps, setFps] = useState(0);
+  const [error, setError] = useState("");
+  const [installOpen, setInstallOpen] = useState(false);
+  const [standalone, setStandalone] = useState(false);
+
+  useEffect(() => {
+    const nav = navigator as Navigator & { standalone?: boolean };
+    const standaloneTimer = window.setTimeout(() => {
+      setStandalone(
+        window.matchMedia("(display-mode: standalone)").matches ||
+          nav.standalone === true,
+      );
+    }, 0);
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    }
+    return () => window.clearTimeout(standaloneTimer);
+  }, []);
+
+  const ensurePose = useCallback(async () => {
+    if (poseRef.current) return poseRef.current;
+    if (posePromiseRef.current) return posePromiseRef.current;
+
+    posePromiseRef.current = (async () => {
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.0/wasm",
+      );
+      const create = (delegate: "GPU" | "CPU") =>
+        PoseLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: MODEL_URL,
+            delegate,
+          },
+          runningMode: "VIDEO",
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.55,
+          minPosePresenceConfidence: 0.55,
+          minTrackingConfidence: 0.55,
+          outputSegmentationMasks: false,
+        });
+
+      try {
+        poseRef.current = await create("GPU");
+      } catch {
+        poseRef.current = await create("CPU");
+      }
+      return poseRef.current;
+    })();
+
+    try {
+      return await posePromiseRef.current;
+    } catch (modelError) {
+      posePromiseRef.current = null;
+      throw modelError;
+    }
+  }, []);
+
+  const clearCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+  }, []);
+
+  const drawPose = useCallback(
+    (rawPoints: Landmark[]) => {
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      if (!canvas || !video || !video.videoWidth || !video.videoHeight) return;
+
+      const cssWidth = canvas.clientWidth;
+      const cssHeight = canvas.clientHeight;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const targetWidth = Math.round(cssWidth * dpr);
+      const targetHeight = Math.round(cssHeight * dpr);
+      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+      }
+
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      context.clearRect(0, 0, cssWidth, cssHeight);
+
+      const prior = previousPointsRef.current;
+      const points = rawPoints.map((point, index) => {
+        const old = prior?.[index];
+        if (!old) return point;
+        const currentWeight = 0.48;
+        return {
+          ...point,
+          x: old.x * (1 - currentWeight) + point.x * currentWeight,
+          y: old.y * (1 - currentWeight) + point.y * currentWeight,
+          z:
+            (old.z ?? 0) * (1 - currentWeight) +
+            (point.z ?? 0) * currentWeight,
+        };
+      });
+      previousPointsRef.current = points;
+      setPoseName(classifyPose(points));
+
+      if (!skeleton) return;
+
+      const scale = Math.max(
+        cssWidth / video.videoWidth,
+        cssHeight / video.videoHeight,
+      );
+      const renderedWidth = video.videoWidth * scale;
+      const renderedHeight = video.videoHeight * scale;
+      const offsetX = (cssWidth - renderedWidth) / 2;
+      const offsetY = (cssHeight - renderedHeight) / 2;
+      const pointToCanvas = (point: Landmark) => ({
+        x: (mirror ? 1 - point.x : point.x) * renderedWidth + offsetX,
+        y: point.y * renderedHeight + offsetY,
+      });
+
+      context.save();
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.shadowColor = "rgba(57, 231, 255, .72)";
+      context.shadowBlur = 10;
+      context.strokeStyle = "#39e7ff";
+      context.lineWidth = Math.max(3, Math.min(cssWidth, cssHeight) * 0.006);
+
+      CONNECTIONS.forEach(([from, to]) => {
+        const first = points[from];
+        const second = points[to];
+        if (
+          !first ||
+          !second ||
+          (first.visibility ?? 1) < 0.45 ||
+          (second.visibility ?? 1) < 0.45
+        )
+          return;
+        const start = pointToCanvas(first);
+        const end = pointToCanvas(second);
+        context.beginPath();
+        context.moveTo(start.x, start.y);
+        context.lineTo(end.x, end.y);
+        context.stroke();
+      });
+
+      context.shadowColor = "rgba(185, 255, 74, .85)";
+      context.shadowBlur = 12;
+      points.forEach((point, index) => {
+        if ((point.visibility ?? 1) < 0.55 || (index > 0 && index < 7)) return;
+        const current = pointToCanvas(point);
+        const radius = Math.max(3.5, Math.min(cssWidth, cssHeight) * 0.007);
+        context.beginPath();
+        context.arc(current.x, current.y, radius, 0, Math.PI * 2);
+        context.fillStyle = "#071006";
+        context.fill();
+        context.lineWidth = Math.max(2, radius * 0.48);
+        context.strokeStyle = "#b9ff4a";
+        context.stroke();
+      });
+      context.restore();
+    },
+    [mirror, skeleton],
+  );
+
+  const runDetection = useCallback(() => {
+    const tick = () => {
+      if (!activeRef.current) return;
+      const video = videoRef.current;
+      const pose = poseRef.current;
+      const now = performance.now();
+
+      if (
+        video &&
+        pose &&
+        video.readyState >= 2 &&
+        now - lastDetectRef.current >= 50
+      ) {
+        lastDetectRef.current = now;
+        try {
+          const result = pose.detectForVideo(video, now);
+          const points = result.landmarks?.[0] as Landmark[] | undefined;
+          if (points?.length) {
+            drawPose(points);
+            setStatus("tracking");
+          } else {
+            clearCanvas();
+            previousPointsRef.current = null;
+            setPoseName("ยังไม่พบคน");
+            setStatus("lost");
+          }
+
+          const window = fpsWindowRef.current;
+          if (!window.started) window.started = now;
+          window.frames += 1;
+          if (now - window.started >= 1000) {
+            setFps(Math.round((window.frames * 1000) / (now - window.started)));
+            fpsWindowRef.current = { started: now, frames: 0 };
+          }
+        } catch {
+          // A transient frame decode error is safe to ignore.
+        }
+      }
+      frameRef.current = requestAnimationFrame(tick);
+    };
+
+    if (frameRef.current) cancelAnimationFrame(frameRef.current);
+    frameRef.current = requestAnimationFrame(tick);
+  }, [clearCanvas, drawPose]);
+
+  const openStream = useCallback(
+    async (mode: FacingMode) => {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: mode },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30, max: 30 },
+        },
+      });
+      streamRef.current = stream;
+      const video = videoRef.current;
+      if (!video) return;
+      video.srcObject = stream;
+      await video.play();
+    },
+    [],
+  );
+
+  const stopCamera = useCallback(() => {
+    activeRef.current = false;
+    if (frameRef.current) cancelAnimationFrame(frameRef.current);
+    frameRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    previousPointsRef.current = null;
+    fpsWindowRef.current = { started: 0, frames: 0 };
+    clearCanvas();
+    setFps(0);
+    setPoseName("รอเริ่มตรวจจับ");
+    setStatus("idle");
+    setActive(false);
+  }, [clearCanvas]);
+
+  const startCamera = useCallback(async () => {
+    if (activeRef.current) {
+      stopCamera();
+      return;
+    }
+
+    setError("");
+    setStatus("camera");
+    try {
+      await openStream(facingRef.current);
+      activeRef.current = true;
+      setActive(true);
+      setStatus("loading");
+      await ensurePose();
+      if (!activeRef.current) return;
+      runDetection();
+    } catch (cameraError) {
+      stopCamera();
+      const name =
+        cameraError instanceof DOMException ? cameraError.name : "UnknownError";
+      if (name === "NotAllowedError") {
+        setError("Safari ยังไม่ได้รับอนุญาตให้ใช้กล้อง กรุณาอนุญาตกล้องแล้วลองใหม่");
+      } else if (name === "NotFoundError") {
+        setError("ไม่พบกล้องที่ใช้งานได้บนอุปกรณ์นี้");
+      } else {
+        setError("เกิดข้อผิดพลาดขณะเปิดกล้องหรือโหลดระบบตรวจจับ กรุณาลองใหม่");
+      }
+      setStatus("error");
+    }
+  }, [ensurePose, openStream, runDetection, stopCamera]);
+
+  const switchCamera = useCallback(async () => {
+    const next: FacingMode =
+      facingRef.current === "user" ? "environment" : "user";
+    facingRef.current = next;
+    setFacing(next);
+    setMirror(next === "user");
+    if (!activeRef.current) return;
+
+    setStatus("camera");
+    try {
+      await openStream(next);
+      previousPointsRef.current = null;
+      runDetection();
+    } catch {
+      setError("สลับกล้องไม่สำเร็จ อุปกรณ์อาจมีกล้องให้เลือกเพียงตัวเดียว");
+    }
+  }, [openStream, runDetection]);
+
+  useEffect(
+    () => () => {
+      activeRef.current = false;
+      if (frameRef.current) cancelAnimationFrame(frameRef.current);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      poseRef.current?.close();
+    },
+    [],
+  );
+
+  return (
+    <main className="app-shell">
+      <header className="app-header">
+        <button
+          aria-label="คำแนะนำการติดตั้ง"
+          className="brand-button"
+          onClick={() => setInstallOpen(true)}
+          type="button"
+        >
+          <span className="brand-mark" aria-hidden="true">
+            <Icon name="body" size={28} />
+          </span>
+          <span className="brand-copy">
+            <strong>Pose Skeleton</strong>
+            <small>ตรวจท่าทางจากกล้อง</small>
+          </span>
+        </button>
+
+        <div className="privacy-badge" title="ภาพกล้องไม่ถูกอัปโหลด">
+          <Icon name="shield" size={19} />
+          <span>ประมวลผลบนเครื่อง</span>
+          <i aria-hidden="true" />
+          <span>เป็นส่วนตัว</span>
+        </div>
+      </header>
+
+      <section className="camera-shell" aria-label="พื้นที่ตรวจจับท่าทาง">
+        <div className={`camera-stage ${active ? "is-active" : ""}`}>
+          <video
+            aria-label="ภาพจากกล้อง"
+            className={mirror ? "is-mirrored" : ""}
+            muted
+            playsInline
+            ref={videoRef}
+          />
+          <canvas aria-hidden="true" ref={canvasRef} />
+
+          {!active && (
+            <div className="empty-state">
+              <span className="empty-body" aria-hidden="true">
+                <Icon name="body" size={74} />
+              </span>
+              <h1>มองเห็นท่าทาง<br />เป็นโครงกระดูก</h1>
+              <p>ตั้งโทรศัพท์ให้เห็นร่างกาย แล้วกดเริ่มกล้อง</p>
+            </div>
+          )}
+
+          <div className={`status-pill status-${status}`}>
+            <i aria-hidden="true" />
+            <span>{STATUS_COPY[status]}</span>
+          </div>
+
+          {active && (
+            <div className="pose-card" aria-live="polite">
+              <span>ท่าที่เห็น</span>
+              <strong>{poseName}</strong>
+              {fps > 0 && <small>{fps} FPS</small>}
+            </div>
+          )}
+
+          {error && (
+            <div className="error-toast" role="alert">
+              {error}
+            </div>
+          )}
+
+          <div className="control-dock">
+            <button
+              className={`start-button ${active ? "is-stop" : ""}`}
+              onClick={startCamera}
+              type="button"
+            >
+              <Icon name="camera" size={30} />
+              <span>{active ? "หยุดกล้อง" : "เริ่มกล้อง"}</span>
+            </button>
+
+            <div className="control-row">
+              <button
+                aria-pressed={mirror}
+                className={mirror ? "is-on" : ""}
+                onClick={() => setMirror((value) => !value)}
+                type="button"
+              >
+                <Icon name="flip" />
+                <span>กระจก</span>
+              </button>
+              <button onClick={switchCamera} type="button">
+                <Icon name="camera" />
+                <span>{facing === "user" ? "กล้องหน้า" : "กล้องหลัง"}</span>
+              </button>
+              <button
+                aria-pressed={skeleton}
+                className={skeleton ? "is-on" : ""}
+                onClick={() => {
+                  setSkeleton((value) => {
+                    if (value) clearCanvas();
+                    return !value;
+                  });
+                }}
+                type="button"
+              >
+                <Icon name="body" />
+                <span>โครงร่าง</span>
+              </button>
+            </div>
+          </div>
+
+          {!standalone && (
+            <button
+              className="install-hint"
+              onClick={() => setInstallOpen(true)}
+              type="button"
+            >
+              <Icon name="home" size={18} />
+              <span>เพิ่มไปยังหน้าจอโฮม</span>
+            </button>
+          )}
+        </div>
+      </section>
+
+      {installOpen && (
+        <div
+          aria-labelledby="install-title"
+          aria-modal="true"
+          className="modal-backdrop"
+          role="dialog"
+        >
+          <section className="install-card">
+            <button
+              aria-label="ปิด"
+              className="modal-close"
+              onClick={() => setInstallOpen(false)}
+              type="button"
+            >
+              <Icon name="close" />
+            </button>
+            <span className="install-icon">
+              <Icon name="home" size={34} />
+            </span>
+            <h2 id="install-title">เพิ่มแอปบนหน้าจอโฮม</h2>
+            <ol>
+              <li>
+                เปิดหน้านี้ด้วย <strong>Safari</strong>
+              </li>
+              <li>
+                แตะปุ่ม <strong>แชร์</strong> ด้านล่าง
+              </li>
+              <li>
+                เลือก <strong>เพิ่มไปยังหน้าจอโฮม</strong>
+              </li>
+            </ol>
+            <button
+              className="modal-done"
+              onClick={() => setInstallOpen(false)}
+              type="button"
+            >
+              เข้าใจแล้ว
+            </button>
+          </section>
+        </div>
+      )}
+    </main>
+  );
+}
