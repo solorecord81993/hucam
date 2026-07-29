@@ -58,7 +58,15 @@ function Icon({
   name,
   size = 24,
 }: {
-  name: "camera" | "flip" | "body" | "shield" | "home" | "close";
+  name:
+    | "camera"
+    | "flip"
+    | "body"
+    | "shield"
+    | "home"
+    | "close"
+    | "chevronDown"
+    | "chevronUp";
   size?: number;
 }) {
   const paths = {
@@ -94,6 +102,8 @@ function Icon({
       </>
     ),
     close: <path d="m6 6 12 12M18 6 6 18" />,
+    chevronDown: <path d="m6 9 6 6 6-6" />,
+    chevronUp: <path d="m6 15 6-6 6 6" />,
   };
 
   return (
@@ -174,6 +184,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [installOpen, setInstallOpen] = useState(false);
   const [standalone, setStandalone] = useState(false);
+  const [controlsHidden, setControlsHidden] = useState(false);
 
   useEffect(() => {
     const nav = navigator as Navigator & { standalone?: boolean };
@@ -538,7 +549,25 @@ export default function Home() {
             </div>
           )}
 
-          <div className="control-dock">
+          <div
+            className={`control-dock ${controlsHidden ? "is-collapsed" : ""}`}
+          >
+            <button
+              aria-expanded={!controlsHidden}
+              aria-label={
+                controlsHidden ? "แสดงแถบเครื่องมือ" : "ซ่อนแถบเครื่องมือ"
+              }
+              className="dock-visibility-toggle"
+              onClick={() => setControlsHidden((value) => !value)}
+              type="button"
+            >
+              <Icon
+                name={controlsHidden ? "chevronUp" : "chevronDown"}
+                size={20}
+              />
+              <span>{controlsHidden ? "แสดงเครื่องมือ" : "ซ่อน"}</span>
+            </button>
+
             <button
               className={`start-button ${active ? "is-stop" : ""}`}
               onClick={startCamera}
