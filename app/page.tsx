@@ -60,6 +60,8 @@ const LIVING_OBJECT_CATEGORIES = [
 ];
 const LIVING_OBJECT_CATEGORY_SET = new Set(LIVING_OBJECT_CATEGORIES);
 const OBJECT_DETECTION_INTERVAL_MS = 300;
+const PERSON_CONFIRMATION_SCORE = 0.45;
+const PERSON_CONFIRMATION_WINDOW_MS = 800;
 
 const THAI_OBJECT_NAMES: Record<string, string> = {
   person: "คน",
@@ -341,6 +343,7 @@ export default function Home() {
   const lastDetectRef = useRef(0);
   const lastObjectDetectRef = useRef(0);
   const lastObjectFoundRef = useRef(0);
+  const lastPersonFoundRef = useRef(0);
   const fpsWindowRef = useRef({ started: 0, frames: 0 });
 
   const [active, setActive] = useState(false);
@@ -667,7 +670,7 @@ export default function Home() {
       if (
         video &&
         objectDetector &&
-        objectsEnabledRef.current &&
+        (objectsEnabledRef.current || skeletonRef.current) &&
         video.readyState >= 2 &&
         now - lastObjectDetectRef.current >= OBJECT_DETECTION_INTERVAL_MS
       ) {
@@ -683,9 +686,18 @@ export default function Home() {
             return LIVING_OBJECT_CATEGORY_SET.has(name);
           });
           drawObjects(livingDetections);
+          const personConfirmed = livingDetections.some((detection) => {
+            const category = detection.categories?.[0];
+            return (
+              category?.categoryName?.toLowerCase() === "person" &&
+              (category.score ?? 0) >= PERSON_CONFIRMATION_SCORE
+            );
+          });
+          if (personConfirmed) lastPersonFoundRef.current = now;
+
           if (livingDetections.length > 0) {
             lastObjectFoundRef.current = now;
-            setStatus("object");
+            if (objectsEnabledRef.current) setStatus("object");
           }
         } catch {
           // A transient frame decode error is safe to ignore.
@@ -703,15 +715,24 @@ export default function Home() {
         try {
           const result = pose.detectForVideo(video, now);
           const points = result.landmarks?.[0] as Landmark[] | undefined;
-          if (points?.length) {
+          const personRecentlyConfirmed =
+            !objectDetector ||
+            now - lastPersonFoundRef.current <=
+              PERSON_CONFIRMATION_WINDOW_MS;
+          if (points?.length && personRecentlyConfirmed) {
             drawPose(points);
             setStatus("tracking");
           } else {
             clearCanvas();
             previousPointsRef.current = null;
-            setPoseName("ยังไม่พบคน");
+            setPoseName(
+              points?.length ? "ยังไม่ยืนยันว่าเป็นคน" : "ยังไม่พบคน",
+            );
             setStatus(
-              now - lastObjectFoundRef.current < 600 ? "object" : "lost",
+              objectsEnabledRef.current &&
+                now - lastObjectFoundRef.current < 600
+                ? "object"
+                : "lost",
             );
           }
 
@@ -788,6 +809,7 @@ export default function Home() {
     fpsWindowRef.current = { started: 0, frames: 0 };
     lastObjectDetectRef.current = 0;
     lastObjectFoundRef.current = 0;
+    lastPersonFoundRef.current = 0;
     clearCanvas();
     clearObjectCanvas();
     setFps(0);
@@ -882,6 +904,9 @@ export default function Home() {
         await openStream(next);
         previousPointsRef.current = null;
         lastObjectDetectRef.current = 0;
+        lastObjectFoundRef.current = 0;
+        lastPersonFoundRef.current = 0;
+        clearCanvas();
         runDetection();
       } catch {
         setError("สลับกล้องไม่สำเร็จ อุปกรณ์อาจมีกล้องให้เลือกเพียงตัวเดียว");
@@ -904,11 +929,14 @@ export default function Home() {
       await openStream(nextFacing, nextDevice.deviceId);
       previousPointsRef.current = null;
       lastObjectDetectRef.current = 0;
+      lastObjectFoundRef.current = 0;
+      lastPersonFoundRef.current = 0;
+      clearCanvas();
       runDetection();
     } catch {
       setError("เปิดเลนส์นี้ไม่สำเร็จ กรุณาลองเลนส์ถัดไป");
     }
-  }, [openStream, runDetection, videoDevices]);
+  }, [clearCanvas, openStream, runDetection, videoDevices]);
 
   const enterCleanView = useCallback(async () => {
     setCleanView(true);
