@@ -223,6 +223,7 @@ function Icon({
     | "chevronDown"
     | "chevronUp"
     | "box"
+    | "silhouette"
     | "fullscreen";
   size?: number;
 }) {
@@ -265,6 +266,13 @@ function Icon({
       <>
         <path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
         <rect height="8" rx="1.5" width="8" x="8" y="8" />
+      </>
+    ),
+    silhouette: (
+      <>
+        <circle cx="12" cy="5" r="2.2" />
+        <path d="M8.4 20c.2-3.3.7-5.6 1.7-7.1L9 9.5c1.8-1.1 4.2-1.1 6 0l-1.1 3.4c1 1.5 1.5 3.8 1.7 7.1" />
+        <path d="M9.2 10.5 6.5 14M14.8 10.5l2.7 3.5" />
       </>
     ),
     fullscreen: (
@@ -346,6 +354,7 @@ export default function Home() {
   const selectedDeviceIdRef = useRef("");
   const mirrorRef = useRef(true);
   const skeletonRef = useRef(true);
+  const personMaskEnabledRef = useRef(true);
   const objectsEnabledRef = useRef(true);
   const previousPointsRef = useRef<Landmark[] | null>(null);
   const lastDetectRef = useRef(0);
@@ -359,6 +368,7 @@ export default function Home() {
   const [active, setActive] = useState(false);
   const [mirror, setMirror] = useState(true);
   const [skeleton, setSkeleton] = useState(true);
+  const [personMaskEnabled, setPersonMaskEnabled] = useState(true);
   const [objectsEnabled, setObjectsEnabled] = useState(true);
   const [facing, setFacing] = useState<FacingMode>("user");
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
@@ -529,7 +539,7 @@ export default function Home() {
       previousPointsRef.current = points;
       setPoseName(classifyPose(points));
 
-      if (!skeletonRef.current) return;
+      if (!skeletonRef.current && !personMaskEnabledRef.current) return;
 
       const scale = Math.max(
         cssWidth / video.videoWidth,
@@ -541,6 +551,7 @@ export default function Home() {
       const offsetY = (cssHeight - renderedHeight) / 2;
 
       if (
+        personMaskEnabledRef.current &&
         personMask &&
         now - lastPersonMaskUpdateRef.current >=
           PERSON_MASK_UPDATE_INTERVAL_MS
@@ -605,7 +616,7 @@ export default function Home() {
       }
 
       const maskCanvas = personMaskCanvasRef.current;
-      if (maskCanvas) {
+      if (personMaskEnabledRef.current && maskCanvas) {
         context.save();
         context.imageSmoothingEnabled = true;
         if (mirrorRef.current) {
@@ -621,6 +632,8 @@ export default function Home() {
         );
         context.restore();
       }
+
+      if (!skeletonRef.current) return;
 
       const pointToCanvas = (point: Landmark) => ({
         x:
@@ -770,7 +783,9 @@ export default function Home() {
       if (
         video &&
         objectDetector &&
-        (objectsEnabledRef.current || skeletonRef.current) &&
+        (objectsEnabledRef.current ||
+          skeletonRef.current ||
+          personMaskEnabledRef.current) &&
         video.readyState >= 2 &&
         now - lastObjectDetectRef.current >= OBJECT_DETECTION_INTERVAL_MS
       ) {
@@ -807,6 +822,7 @@ export default function Home() {
       if (
         video &&
         pose &&
+        (skeletonRef.current || personMaskEnabledRef.current) &&
         !processedObjectFrame &&
         video.readyState >= 2 &&
         now - lastDetectRef.current >= 50
@@ -1248,7 +1264,24 @@ export default function Home() {
                 type="button"
               >
                 <Icon name="body" />
-                <span>โครงร่าง</span>
+                <span>Skeleton</span>
+              </button>
+              <button
+                aria-label="เปิดหรือปิดเส้นขอบและสีโปร่งแสงของคน"
+                aria-pressed={personMaskEnabled}
+                className={personMaskEnabled ? "is-on" : ""}
+                onClick={() => {
+                  setPersonMaskEnabled((value) => {
+                    const next = !value;
+                    personMaskEnabledRef.current = next;
+                    clearCanvas();
+                    return next;
+                  });
+                }}
+                type="button"
+              >
+                <Icon name="silhouette" />
+                <span>เงาคน</span>
               </button>
               <button
                 aria-pressed={objectsEnabled}
