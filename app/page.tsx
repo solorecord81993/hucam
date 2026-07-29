@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
+import {
+  FilesetResolver,
+  ObjectDetector,
+  PoseLandmarker,
+} from "@mediapipe/tasks-vision";
 
 type FacingMode = "user" | "environment";
 type AppStatus = "idle" | "camera" | "loading" | "tracking" | "lost" | "error";
@@ -13,8 +17,108 @@ type Landmark = {
   visibility?: number;
 };
 
-const MODEL_URL =
+type ObjectDetection = {
+  boundingBox?: {
+    originX: number;
+    originY: number;
+    width: number;
+    height: number;
+  };
+  categories: Array<{
+    categoryName?: string;
+    displayName?: string;
+    score?: number;
+  }>;
+};
+
+const POSE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
+
+const OBJECT_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-tasks/object_detector/efficientdet_lite0_uint8.tflite";
+
+const THAI_OBJECT_NAMES: Record<string, string> = {
+  person: "คน",
+  bicycle: "จักรยาน",
+  car: "รถยนต์",
+  motorcycle: "รถจักรยานยนต์",
+  airplane: "เครื่องบิน",
+  bus: "รถโดยสาร",
+  train: "รถไฟ",
+  truck: "รถบรรทุก",
+  boat: "เรือ",
+  "traffic light": "ไฟจราจร",
+  "fire hydrant": "หัวจ่ายน้ำดับเพลิง",
+  "stop sign": "ป้ายหยุด",
+  "parking meter": "มิเตอร์จอดรถ",
+  bench: "ม้านั่ง",
+  bird: "นก",
+  cat: "แมว",
+  dog: "สุนัข",
+  horse: "ม้า",
+  sheep: "แกะ",
+  cow: "วัว",
+  elephant: "ช้าง",
+  bear: "หมี",
+  zebra: "ม้าลาย",
+  giraffe: "ยีราฟ",
+  backpack: "กระเป๋าเป้",
+  umbrella: "ร่ม",
+  handbag: "กระเป๋าถือ",
+  tie: "เนกไท",
+  suitcase: "กระเป๋าเดินทาง",
+  frisbee: "จานร่อน",
+  skis: "สกี",
+  snowboard: "สโนว์บอร์ด",
+  "sports ball": "ลูกบอล",
+  kite: "ว่าว",
+  "baseball bat": "ไม้เบสบอล",
+  "baseball glove": "ถุงมือเบสบอล",
+  skateboard: "สเกตบอร์ด",
+  surfboard: "กระดานโต้คลื่น",
+  "tennis racket": "ไม้เทนนิส",
+  bottle: "ขวด",
+  "wine glass": "แก้วไวน์",
+  cup: "แก้ว",
+  fork: "ส้อม",
+  knife: "มีด",
+  spoon: "ช้อน",
+  bowl: "ชาม",
+  banana: "กล้วย",
+  apple: "แอปเปิล",
+  sandwich: "แซนด์วิช",
+  orange: "ส้ม",
+  broccoli: "บรอกโคลี",
+  carrot: "แครอต",
+  "hot dog": "ฮอตดอก",
+  pizza: "พิซซ่า",
+  donut: "โดนัท",
+  cake: "เค้ก",
+  chair: "เก้าอี้",
+  couch: "โซฟา",
+  "potted plant": "ต้นไม้กระถาง",
+  bed: "เตียง",
+  "dining table": "โต๊ะอาหาร",
+  toilet: "โถสุขภัณฑ์",
+  tv: "โทรทัศน์",
+  laptop: "แล็ปท็อป",
+  mouse: "เมาส์",
+  remote: "รีโมต",
+  keyboard: "แป้นพิมพ์",
+  "cell phone": "โทรศัพท์มือถือ",
+  microwave: "ไมโครเวฟ",
+  oven: "เตาอบ",
+  toaster: "เครื่องปิ้งขนมปัง",
+  sink: "อ่างล้าง",
+  refrigerator: "ตู้เย็น",
+  book: "หนังสือ",
+  clock: "นาฬิกา",
+  vase: "แจกัน",
+  scissors: "กรรไกร",
+  "teddy bear": "ตุ๊กตาหมี",
+  "hair drier": "ไดร์เป่าผม",
+  toothbrush: "แปรงสีฟัน",
+};
 
 const CONNECTIONS: Array<[number, number]> = [
   [0, 7],
@@ -48,7 +152,7 @@ const CONNECTIONS: Array<[number, number]> = [
 const STATUS_COPY: Record<AppStatus, string> = {
   idle: "พร้อมเริ่มกล้อง",
   camera: "เปิดกล้องแล้ว",
-  loading: "กำลังเตรียม AI ตรวจจับท่าทาง",
+  loading: "กำลังเตรียม AI ตรวจจับคนและวัตถุ",
   tracking: "ตรวจพบท่าทาง",
   lost: "ขยับให้เห็นร่างกายในกรอบ",
   error: "เปิดกล้องไม่สำเร็จ",
@@ -66,7 +170,8 @@ function Icon({
     | "home"
     | "close"
     | "chevronDown"
-    | "chevronUp";
+    | "chevronUp"
+    | "box";
   size?: number;
 }) {
   const paths = {
@@ -104,6 +209,12 @@ function Icon({
     close: <path d="m6 6 12 12M18 6 6 18" />,
     chevronDown: <path d="m6 9 6 6 6-6" />,
     chevronUp: <path d="m6 15 6-6 6 6" />,
+    box: (
+      <>
+        <path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
+        <rect height="8" rx="1.5" width="8" x="8" y="8" />
+      </>
+    ),
   };
 
   return (
@@ -164,19 +275,27 @@ function classifyPose(points: Landmark[]) {
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const objectCanvasRef = useRef<HTMLCanvasElement>(null);
   const poseRef = useRef<PoseLandmarker | null>(null);
   const posePromiseRef = useRef<Promise<PoseLandmarker> | null>(null);
+  const objectDetectorRef = useRef<ObjectDetector | null>(null);
+  const objectPromiseRef = useRef<Promise<ObjectDetector> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const frameRef = useRef<number | null>(null);
   const activeRef = useRef(false);
   const facingRef = useRef<FacingMode>("user");
+  const mirrorRef = useRef(true);
+  const skeletonRef = useRef(true);
+  const objectsEnabledRef = useRef(true);
   const previousPointsRef = useRef<Landmark[] | null>(null);
   const lastDetectRef = useRef(0);
+  const lastObjectDetectRef = useRef(0);
   const fpsWindowRef = useRef({ started: 0, frames: 0 });
 
   const [active, setActive] = useState(false);
   const [mirror, setMirror] = useState(true);
   const [skeleton, setSkeleton] = useState(true);
+  const [objectsEnabled, setObjectsEnabled] = useState(true);
   const [facing, setFacing] = useState<FacingMode>("user");
   const [status, setStatus] = useState<AppStatus>("idle");
   const [poseName, setPoseName] = useState("รอเริ่มตรวจจับ");
@@ -211,7 +330,7 @@ export default function Home() {
       const create = (delegate: "GPU" | "CPU") =>
         PoseLandmarker.createFromOptions(vision, {
           baseOptions: {
-            modelAssetPath: MODEL_URL,
+            modelAssetPath: POSE_MODEL_URL,
             delegate,
           },
           runningMode: "VIDEO",
@@ -238,8 +357,50 @@ export default function Home() {
     }
   }, []);
 
+  const ensureObjectDetector = useCallback(async () => {
+    if (objectDetectorRef.current) return objectDetectorRef.current;
+    if (objectPromiseRef.current) return objectPromiseRef.current;
+
+    objectPromiseRef.current = (async () => {
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.0/wasm",
+      );
+      const create = (delegate: "GPU" | "CPU") =>
+        ObjectDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: OBJECT_MODEL_URL,
+            delegate,
+          },
+          runningMode: "VIDEO",
+          displayNamesLocale: "en",
+          maxResults: 10,
+          scoreThreshold: 0.42,
+        });
+
+      try {
+        objectDetectorRef.current = await create("GPU");
+      } catch {
+        objectDetectorRef.current = await create("CPU");
+      }
+      return objectDetectorRef.current;
+    })();
+
+    try {
+      return await objectPromiseRef.current;
+    } catch (modelError) {
+      objectPromiseRef.current = null;
+      throw modelError;
+    }
+  }, []);
+
   const clearCanvas = useCallback(() => {
     const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+  }, []);
+
+  const clearObjectCanvas = useCallback(() => {
+    const canvas = objectCanvasRef.current;
     const context = canvas?.getContext("2d");
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
@@ -282,7 +443,7 @@ export default function Home() {
       previousPointsRef.current = points;
       setPoseName(classifyPose(points));
 
-      if (!skeleton) return;
+      if (!skeletonRef.current) return;
 
       const scale = Math.max(
         cssWidth / video.videoWidth,
@@ -293,7 +454,9 @@ export default function Home() {
       const offsetX = (cssWidth - renderedWidth) / 2;
       const offsetY = (cssHeight - renderedHeight) / 2;
       const pointToCanvas = (point: Landmark) => ({
-        x: (mirror ? 1 - point.x : point.x) * renderedWidth + offsetX,
+        x:
+          (mirrorRef.current ? 1 - point.x : point.x) * renderedWidth +
+          offsetX,
         y: point.y * renderedHeight + offsetY,
       });
 
@@ -339,15 +502,115 @@ export default function Home() {
       });
       context.restore();
     },
-    [mirror, skeleton],
+    [],
   );
+
+  const drawObjects = useCallback((detections: ObjectDetection[]) => {
+    const canvas = objectCanvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video || !video.videoWidth || !video.videoHeight) return;
+
+    const cssWidth = canvas.clientWidth;
+    const cssHeight = canvas.clientHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const targetWidth = Math.round(cssWidth * dpr);
+    const targetHeight = Math.round(cssHeight * dpr);
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+    }
+
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, cssWidth, cssHeight);
+    if (!objectsEnabledRef.current) return;
+
+    const scale = Math.max(
+      cssWidth / video.videoWidth,
+      cssHeight / video.videoHeight,
+    );
+    const renderedWidth = video.videoWidth * scale;
+    const renderedHeight = video.videoHeight * scale;
+    const offsetX = (cssWidth - renderedWidth) / 2;
+    const offsetY = (cssHeight - renderedHeight) / 2;
+
+    context.save();
+    context.lineJoin = "round";
+    context.textBaseline = "middle";
+
+    detections.forEach((detection) => {
+      const box = detection.boundingBox;
+      const category = detection.categories?.[0];
+      if (!box || !category) return;
+
+      const sourceX = mirrorRef.current
+        ? video.videoWidth - box.originX - box.width
+        : box.originX;
+      const x = sourceX * scale + offsetX;
+      const y = box.originY * scale + offsetY;
+      const width = box.width * scale;
+      const height = box.height * scale;
+      const rawName =
+        category.categoryName || category.displayName || "object";
+      const translatedName = THAI_OBJECT_NAMES[rawName.toLowerCase()] || rawName;
+      const confidence = Math.round((category.score ?? 0) * 100);
+      const label = `${translatedName}  ${confidence}%`;
+      const fontSize = Math.max(12, Math.min(cssWidth, cssHeight) * 0.022);
+
+      context.shadowColor = "rgba(185, 255, 74, .72)";
+      context.shadowBlur = 9;
+      context.strokeStyle = "#b9ff4a";
+      context.lineWidth = Math.max(2.5, Math.min(cssWidth, cssHeight) * 0.005);
+      context.strokeRect(x, y, width, height);
+
+      context.font = `650 ${fontSize}px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif`;
+      const horizontalPadding = fontSize * 0.58;
+      const labelHeight = fontSize * 1.8;
+      const labelWidth = context.measureText(label).width + horizontalPadding * 2;
+      const labelX = Math.max(
+        0,
+        Math.min(x, Math.max(0, cssWidth - labelWidth)),
+      );
+      const labelY = y >= labelHeight ? y - labelHeight : y;
+
+      context.shadowBlur = 0;
+      context.fillStyle = "rgba(7, 16, 6, .92)";
+      context.fillRect(labelX, labelY, labelWidth, labelHeight);
+      context.fillStyle = "#d9ff90";
+      context.fillText(
+        label,
+        labelX + horizontalPadding,
+        labelY + labelHeight / 2,
+      );
+    });
+
+    context.restore();
+  }, []);
 
   const runDetection = useCallback(() => {
     const tick = () => {
       if (!activeRef.current) return;
       const video = videoRef.current;
       const pose = poseRef.current;
+      const objectDetector = objectDetectorRef.current;
       const now = performance.now();
+
+      if (
+        video &&
+        objectDetector &&
+        objectsEnabledRef.current &&
+        video.readyState >= 2 &&
+        now - lastObjectDetectRef.current >= 220
+      ) {
+        lastObjectDetectRef.current = now;
+        try {
+          const result = objectDetector.detectForVideo(video, now);
+          drawObjects(result.detections as ObjectDetection[]);
+        } catch {
+          // A transient frame decode error is safe to ignore.
+        }
+      }
 
       if (
         video &&
@@ -385,7 +648,7 @@ export default function Home() {
 
     if (frameRef.current) cancelAnimationFrame(frameRef.current);
     frameRef.current = requestAnimationFrame(tick);
-  }, [clearCanvas, drawPose]);
+  }, [clearCanvas, drawObjects, drawPose]);
 
   const openStream = useCallback(
     async (mode: FacingMode) => {
@@ -417,12 +680,14 @@ export default function Home() {
     if (videoRef.current) videoRef.current.srcObject = null;
     previousPointsRef.current = null;
     fpsWindowRef.current = { started: 0, frames: 0 };
+    lastObjectDetectRef.current = 0;
     clearCanvas();
+    clearObjectCanvas();
     setFps(0);
     setPoseName("รอเริ่มตรวจจับ");
     setStatus("idle");
     setActive(false);
-  }, [clearCanvas]);
+  }, [clearCanvas, clearObjectCanvas]);
 
   const startCamera = useCallback(async () => {
     if (activeRef.current) {
@@ -437,7 +702,7 @@ export default function Home() {
       activeRef.current = true;
       setActive(true);
       setStatus("loading");
-      await ensurePose();
+      await Promise.all([ensurePose(), ensureObjectDetector()]);
       if (!activeRef.current) return;
       runDetection();
     } catch (cameraError) {
@@ -453,13 +718,20 @@ export default function Home() {
       }
       setStatus("error");
     }
-  }, [ensurePose, openStream, runDetection, stopCamera]);
+  }, [
+    ensureObjectDetector,
+    ensurePose,
+    openStream,
+    runDetection,
+    stopCamera,
+  ]);
 
   const switchCamera = useCallback(async () => {
     const next: FacingMode =
       facingRef.current === "user" ? "environment" : "user";
     facingRef.current = next;
     setFacing(next);
+    mirrorRef.current = next === "user";
     setMirror(next === "user");
     if (!activeRef.current) return;
 
@@ -467,6 +739,7 @@ export default function Home() {
     try {
       await openStream(next);
       previousPointsRef.current = null;
+      lastObjectDetectRef.current = 0;
       runDetection();
     } catch {
       setError("สลับกล้องไม่สำเร็จ อุปกรณ์อาจมีกล้องให้เลือกเพียงตัวเดียว");
@@ -479,6 +752,7 @@ export default function Home() {
       if (frameRef.current) cancelAnimationFrame(frameRef.current);
       streamRef.current?.getTracks().forEach((track) => track.stop());
       poseRef.current?.close();
+      objectDetectorRef.current?.close();
     },
     [],
   );
@@ -496,8 +770,8 @@ export default function Home() {
             <Icon name="body" size={28} />
           </span>
           <span className="brand-copy">
-            <strong>Pose Skeleton</strong>
-            <small>ตรวจท่าทางจากกล้อง</small>
+            <strong>Pose + Objects</strong>
+            <small>ตรวจคนและวัตถุจากกล้อง</small>
           </span>
         </button>
 
@@ -509,7 +783,7 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="camera-shell" aria-label="พื้นที่ตรวจจับท่าทาง">
+      <section className="camera-shell" aria-label="พื้นที่ตรวจจับคนและวัตถุ">
         <div className={`camera-stage ${active ? "is-active" : ""}`}>
           <video
             aria-label="ภาพจากกล้อง"
@@ -518,15 +792,24 @@ export default function Home() {
             playsInline
             ref={videoRef}
           />
-          <canvas aria-hidden="true" ref={canvasRef} />
+          <canvas
+            aria-hidden="true"
+            className="pose-canvas"
+            ref={canvasRef}
+          />
+          <canvas
+            aria-hidden="true"
+            className="object-canvas"
+            ref={objectCanvasRef}
+          />
 
           {!active && (
             <div className="empty-state">
               <span className="empty-body" aria-hidden="true">
                 <Icon name="body" size={74} />
               </span>
-              <h1>มองเห็นท่าทาง<br />เป็นโครงกระดูก</h1>
-              <p>ตั้งโทรศัพท์ให้เห็นร่างกาย แล้วกดเริ่มกล้อง</p>
+              <h1>มองเห็นคนและวัตถุ<br />แบบเรียลไทม์</h1>
+              <p>เห็นทั้งโครงกระดูก กรอบวัตถุ และชื่อสิ่งของ</p>
             </div>
           )}
 
@@ -581,7 +864,13 @@ export default function Home() {
               <button
                 aria-pressed={mirror}
                 className={mirror ? "is-on" : ""}
-                onClick={() => setMirror((value) => !value)}
+                onClick={() =>
+                  setMirror((value) => {
+                    const next = !value;
+                    mirrorRef.current = next;
+                    return next;
+                  })
+                }
                 type="button"
               >
                 <Icon name="flip" />
@@ -596,14 +885,32 @@ export default function Home() {
                 className={skeleton ? "is-on" : ""}
                 onClick={() => {
                   setSkeleton((value) => {
-                    if (value) clearCanvas();
-                    return !value;
+                    const next = !value;
+                    skeletonRef.current = next;
+                    if (!next) clearCanvas();
+                    return next;
                   });
                 }}
                 type="button"
               >
                 <Icon name="body" />
                 <span>โครงร่าง</span>
+              </button>
+              <button
+                aria-pressed={objectsEnabled}
+                className={objectsEnabled ? "is-on" : ""}
+                onClick={() => {
+                  setObjectsEnabled((value) => {
+                    const next = !value;
+                    objectsEnabledRef.current = next;
+                    if (!next) clearObjectCanvas();
+                    return next;
+                  });
+                }}
+                type="button"
+              >
+                <Icon name="box" />
+                <span>วัตถุ</span>
               </button>
             </div>
           </div>
