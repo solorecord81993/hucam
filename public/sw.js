@@ -1,4 +1,4 @@
-const CACHE_NAME = "pose-skeleton-v1";
+const CACHE_NAME = "hucam-vision-v2";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/icon.svg", "/icon-maskable.svg"];
 
 self.addEventListener("install", (event) => {
@@ -21,6 +21,20 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET" || new URL(event.request.url).origin !== location.origin) {
+    return;
+  }
+
+  if (event.request.mode === "navigate") {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response.ok) {
+            caches.open(CACHE_NAME).then((cache) => cache.put("/", response.clone()));
+          }
+          return response;
+        })
+        .catch(() => caches.match("/")),
+    );
     return;
   }
 
