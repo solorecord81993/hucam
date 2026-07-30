@@ -497,10 +497,11 @@ button:focus-visible {
 .control-row {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
-.control-row button {
+.control-row button,
+.people-count-control {
   align-items: center;
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.17);
@@ -522,13 +523,47 @@ button:focus-visible {
 }
 
 .control-row button:hover,
-.control-row button.is-on {
+.control-row button.is-on,
+.people-count-control:hover,
+.people-count-control:focus-within {
   background: rgba(57, 231, 255, 0.08);
   border-color: rgba(57, 231, 255, 0.44);
 }
 
-.control-row button.is-on .ui-icon {
+.control-row button.is-on .ui-icon,
+.people-count-control .ui-icon {
   color: var(--lime);
+}
+
+.people-count-control {
+  position: relative;
+}
+
+.people-count-control select {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: #e4e9ea;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  outline: 0;
+  padding: 0 13px 0 4px;
+  text-align: center;
+}
+
+.people-count-control::after {
+  bottom: 12px;
+  color: var(--lime);
+  content: "⌄";
+  font-size: 12px;
+  pointer-events: none;
+  position: absolute;
+  right: 10px;
+}
+
+.people-count-control.is-updating {
+  opacity: 0.56;
 }
 
 .install-hint {
@@ -735,7 +770,12 @@ button:focus-visible {
     min-height: 64px;
   }
 
-  .control-row button {
+  .control-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .control-row button,
+  .people-count-control {
     min-height: 64px;
   }
 
@@ -841,9 +881,11 @@ button:focus-visible {
 
   .control-row {
     gap: 7px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .control-row button {
+  .control-row button,
+  .people-count-control {
     font-size: 10px;
     min-height: 59px;
   }
