@@ -44,6 +44,11 @@ type SegmentationMask = {
   getAsFloat32Array: () => Float32Array;
 };
 
+type PoseFrame = {
+  points: Landmark[];
+  mask?: SegmentationMask;
+};
+
 const POSE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
@@ -70,6 +75,8 @@ const PERSON_CONFIRMATION_SCORE = 0.45;
 const PERSON_CONFIRMATION_WINDOW_MS = 800;
 const PERSON_MASK_UPDATE_INTERVAL_MS = 100;
 const PERSON_MASK_THRESHOLD = 0.5;
+const MAX_PEOPLE_OPTIONS = [1, 2, 3, 4] as const;
+const MAX_PEOPLE_STORAGE_KEY = "hucam-max-people";
 
 const THAI_OBJECT_NAMES: Record<string, string> = {
   person: "คน",
@@ -224,6 +231,7 @@ function Icon({
     | "chevronUp"
     | "box"
     | "silhouette"
+    | "people"
     | "fullscreen";
   size?: number;
 }) {
@@ -273,6 +281,13 @@ function Icon({
         <circle cx="12" cy="5" r="2.2" />
         <path d="M8.4 20c.2-3.3.7-5.6 1.7-7.1L9 9.5c1.8-1.1 4.2-1.1 6 0l-1.1 3.4c1 1.5 1.5 3.8 1.7 7.1" />
         <path d="M9.2 10.5 6.5 14M14.8 10.5l2.7 3.5" />
+      </>
+    ),
+    people: (
+      <>
+        <circle cx="9" cy="7" r="2.5" />
+        <circle cx="16.5" cy="8.5" r="2" />
+        <path d="M3.8 19c.5-4 2.1-6.2 5.2-6.2s4.7 2.2 5.2 6.2M14.2 13.5c3.5-.8 5.4 1.2 6 4.5" />
       </>
     ),
     fullscreen: (
@@ -335,6 +350,65 @@ function classifyPose(points: Landmark[]) {
   return "ยืน";
 }
 
+function getPoseCenter(points: Landmark[]) {
+  const preferred = [11, 12, 23, 24]
+    .map((index) => points[index])
+    .filter(
+      (point): point is Landmark =>
+        Boolean(point) && (point.visibility ?? 1) > 0.35,
+    );
+  const visible =
+    preferred.length >= 2
+      ? preferred
+      : points.filter((point) => (point.visibility ?? 1) > 0.45);
+
+  if (!visible.length) return { x: 0.5, y: 0.5 };
+  return visible.reduce(
+    (center, point) => ({
+      x: center.x + point.x / visible.length,
+      y: center.y + point.y / visible.length,
+    }),
+    { x: 0, y: 0 },
+  );
+}
+
+function orderPoseFrames(frames: PoseFrame[], previous: Landmark[][]) {
+  if (!previous.length) {
+    return frames.map((frame) => ({ ...frame, prior: undefined }));
+  }
+
+  const unmatched = new Set(frames.map((_, index) => index));
+  const ordered: Array<PoseFrame & { prior?: Landmark[] }> = [];
+
+  previous.forEach((prior) => {
+    const priorCenter = getPoseCenter(prior);
+    let bestIndex = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    unmatched.forEach((index) => {
+      const center = getPoseCenter(frames[index].points);
+      const distance = Math.hypot(
+        center.x - priorCenter.x,
+        center.y - priorCenter.y,
+      );
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
+
+    if (bestIndex >= 0 && bestDistance < 0.45) {
+      ordered.push({ ...frames[bestIndex], prior });
+      unmatched.delete(bestIndex);
+    }
+  });
+
+  unmatched.forEach((index) => {
+    ordered.push({ ...frames[index], prior: undefined });
+  });
+  return ordered;
+}
+
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const cameraStageRef = useRef<HTMLDivElement>(null);
@@ -356,12 +430,16 @@ export default function Home() {
   const skeletonRef = useRef(true);
   const personMaskEnabledRef = useRef(true);
   const objectsEnabledRef = useRef(true);
-  const previousPointsRef = useRef<Landmark[] | null>(null);
+  const maxPeopleRef = useRef(1);
+  const poseConfiguringRef = useRef(false);
+  const previousPosesRef = useRef<Landmark[][]>([]);
   const lastDetectRef = useRef(0);
   const lastObjectDetectRef = useRef(0);
   const lastObjectFoundRef = useRef(0);
   const lastPersonFoundRef = useRef(0);
-  const personMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const personMaskCanvasesRef = useRef<
+    Array<HTMLCanvasElement | null>
+  >([]);
   const lastPersonMaskUpdateRef = useRef(0);
   const fpsWindowRef = useRef({ started: 0, frames: 0 });
 
@@ -370,6 +448,8 @@ export default function Home() {
   const [skeleton, setSkeleton] = useState(true);
   const [personMaskEnabled, setPersonMaskEnabled] = useState(true);
   const [objectsEnabled, setObjectsEnabled] = useState(true);
+  const [maxPeople, setMaxPeople] = useState(1);
+  const [peopleUpdating, setPeopleUpdating] = useState(false);
   const [facing, setFacing] = useState<FacingMode>("user");
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
@@ -383,7 +463,18 @@ export default function Home() {
 
   useEffect(() => {
     const nav = navigator as Navigator & { standalone?: boolean };
+    const savedMaxPeople = Number(
+      window.localStorage.getItem(MAX_PEOPLE_STORAGE_KEY),
+    );
+    if (
+      MAX_PEOPLE_OPTIONS.includes(
+        savedMaxPeople as (typeof MAX_PEOPLE_OPTIONS)[number],
+      )
+    ) {
+      maxPeopleRef.current = savedMaxPeople;
+    }
     const standaloneTimer = window.setTimeout(() => {
+      setMaxPeople(maxPeopleRef.current);
       setStandalone(
         window.matchMedia("(display-mode: standalone)").matches ||
           nav.standalone === true,
@@ -420,7 +511,7 @@ export default function Home() {
             delegate,
           },
           runningMode: "VIDEO",
-          numPoses: 1,
+          numPoses: maxPeopleRef.current,
           minPoseDetectionConfidence: 0.55,
           minPosePresenceConfidence: 0.55,
           minTrackingConfidence: 0.55,
@@ -487,7 +578,7 @@ export default function Home() {
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
-    personMaskCanvasRef.current = null;
+    personMaskCanvasesRef.current = [];
     lastPersonMaskUpdateRef.current = 0;
   }, []);
 
@@ -497,10 +588,10 @@ export default function Home() {
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
-  const drawPose = useCallback(
+  const drawPoses = useCallback(
     (
-      rawPoints: Landmark[],
-      personMask: SegmentationMask | undefined,
+      rawPoses: Landmark[][],
+      personMasks: SegmentationMask[],
       now: number,
     ) => {
       const canvas = canvasRef.current;
@@ -522,22 +613,42 @@ export default function Home() {
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
       context.clearRect(0, 0, cssWidth, cssHeight);
 
-      const prior = previousPointsRef.current;
-      const points = rawPoints.map((point, index) => {
-        const old = prior?.[index];
-        if (!old) return point;
-        const currentWeight = 0.48;
-        return {
-          ...point,
-          x: old.x * (1 - currentWeight) + point.x * currentWeight,
-          y: old.y * (1 - currentWeight) + point.y * currentWeight,
-          z:
-            (old.z ?? 0) * (1 - currentWeight) +
-            (point.z ?? 0) * currentWeight,
-        };
+      const frames = rawPoses
+        .slice(0, maxPeopleRef.current)
+        .map((points, index) => ({
+          points,
+          mask: personMasks[index],
+        }));
+      const orderedFrames = orderPoseFrames(
+        frames,
+        previousPosesRef.current,
+      );
+      const poses = orderedFrames.map((frame) => {
+        const points = frame.points.map((point, index) => {
+          const old = frame.prior?.[index];
+          if (!old) return point;
+          const currentWeight = 0.48;
+          return {
+            ...point,
+            x: old.x * (1 - currentWeight) + point.x * currentWeight,
+            y: old.y * (1 - currentWeight) + point.y * currentWeight,
+            z:
+              (old.z ?? 0) * (1 - currentWeight) +
+              (point.z ?? 0) * currentWeight,
+          };
+        });
+        return { points, mask: frame.mask };
       });
-      previousPointsRef.current = points;
-      setPoseName(classifyPose(points));
+      previousPosesRef.current = poses.map((pose) => pose.points);
+
+      const primaryPose = poses[0]?.points;
+      if (!primaryPose) return;
+      const primaryPoseName = classifyPose(primaryPose);
+      setPoseName(
+        poses.length > 1
+          ? `พบ ${poses.length} คน • ${primaryPoseName}`
+          : primaryPoseName,
+      );
 
       if (!skeletonRef.current && !personMaskEnabledRef.current) return;
 
@@ -549,31 +660,38 @@ export default function Home() {
       const renderedHeight = video.videoHeight * scale;
       const offsetX = (cssWidth - renderedWidth) / 2;
       const offsetY = (cssHeight - renderedHeight) / 2;
-
-      if (
+      const cachedMasks = personMaskCanvasesRef.current;
+      const shouldUpdateMasks =
         personMaskEnabledRef.current &&
-        personMask &&
-        now - lastPersonMaskUpdateRef.current >=
-          PERSON_MASK_UPDATE_INTERVAL_MS
-      ) {
-        const width = personMask.width;
-        const height = personMask.height;
-        const confidence = personMask.getAsFloat32Array();
-        let maskCanvas = personMaskCanvasRef.current;
-        if (
-          !maskCanvas ||
-          maskCanvas.width !== width ||
-          maskCanvas.height !== height
-        ) {
-          const nextMaskCanvas = document.createElement("canvas");
-          nextMaskCanvas.width = width;
-          nextMaskCanvas.height = height;
-          personMaskCanvasRef.current = nextMaskCanvas;
-          maskCanvas = nextMaskCanvas;
-        }
+        (now - lastPersonMaskUpdateRef.current >=
+          PERSON_MASK_UPDATE_INTERVAL_MS ||
+          cachedMasks.length !== poses.length);
 
-        const maskContext = maskCanvas.getContext("2d");
-        if (maskContext && confidence.length >= width * height) {
+      if (shouldUpdateMasks) {
+        const nextMaskCanvases = poses.map((pose, poseIndex) => {
+          const personMask = pose.mask;
+          if (!personMask) return null;
+
+          const width = personMask.width;
+          const height = personMask.height;
+          const confidence = personMask.getAsFloat32Array();
+          const cachedMaskCanvas = cachedMasks[poseIndex];
+          let maskCanvas = cachedMaskCanvas;
+
+          if (
+            !maskCanvas ||
+            maskCanvas.width !== width ||
+            maskCanvas.height !== height
+          ) {
+            const nextMaskCanvas = document.createElement("canvas");
+            nextMaskCanvas.width = width;
+            nextMaskCanvas.height = height;
+            maskCanvas = nextMaskCanvas;
+          }
+
+          const maskContext = maskCanvas.getContext("2d");
+          if (!maskContext || confidence.length < width * height) return null;
+
           const maskImage = maskContext.createImageData(width, height);
           const pixels = maskImage.data;
           const edgeRadius = 2;
@@ -611,26 +729,31 @@ export default function Home() {
           }
 
           maskContext.putImageData(maskImage, 0, 0);
-          lastPersonMaskUpdateRef.current = now;
-        }
+          return maskCanvas;
+        });
+
+        personMaskCanvasesRef.current = nextMaskCanvases;
+        lastPersonMaskUpdateRef.current = now;
       }
 
-      const maskCanvas = personMaskCanvasRef.current;
-      if (personMaskEnabledRef.current && maskCanvas) {
-        context.save();
-        context.imageSmoothingEnabled = true;
-        if (mirrorRef.current) {
-          context.translate(cssWidth, 0);
-          context.scale(-1, 1);
-        }
-        context.drawImage(
-          maskCanvas,
-          offsetX,
-          offsetY,
-          renderedWidth,
-          renderedHeight,
-        );
-        context.restore();
+      if (personMaskEnabledRef.current) {
+        personMaskCanvasesRef.current.forEach((maskCanvas) => {
+          if (!maskCanvas) return;
+          context.save();
+          context.imageSmoothingEnabled = true;
+          if (mirrorRef.current) {
+            context.translate(cssWidth, 0);
+            context.scale(-1, 1);
+          }
+          context.drawImage(
+            maskCanvas,
+            offsetX,
+            offsetY,
+            renderedWidth,
+            renderedHeight,
+          );
+          context.restore();
+        });
       }
 
       if (!skeletonRef.current) return;
@@ -642,47 +765,57 @@ export default function Home() {
         y: point.y * renderedHeight + offsetY,
       });
 
-      context.save();
-      context.lineCap = "round";
-      context.lineJoin = "round";
-      context.shadowColor = "rgba(57, 231, 255, .72)";
-      context.shadowBlur = 10;
-      context.strokeStyle = "#39e7ff";
-      context.lineWidth = Math.max(3, Math.min(cssWidth, cssHeight) * 0.006);
+      poses.forEach(({ points }) => {
+        context.save();
+        context.lineCap = "round";
+        context.lineJoin = "round";
+        context.shadowColor = "rgba(57, 231, 255, .72)";
+        context.shadowBlur = 10;
+        context.strokeStyle = "#39e7ff";
+        context.lineWidth = Math.max(
+          3,
+          Math.min(cssWidth, cssHeight) * 0.006,
+        );
 
-      CONNECTIONS.forEach(([from, to]) => {
-        const first = points[from];
-        const second = points[to];
-        if (
-          !first ||
-          !second ||
-          (first.visibility ?? 1) < 0.45 ||
-          (second.visibility ?? 1) < 0.45
-        )
-          return;
-        const start = pointToCanvas(first);
-        const end = pointToCanvas(second);
-        context.beginPath();
-        context.moveTo(start.x, start.y);
-        context.lineTo(end.x, end.y);
-        context.stroke();
-      });
+        CONNECTIONS.forEach(([from, to]) => {
+          const first = points[from];
+          const second = points[to];
+          if (
+            !first ||
+            !second ||
+            (first.visibility ?? 1) < 0.45 ||
+            (second.visibility ?? 1) < 0.45
+          )
+            return;
+          const start = pointToCanvas(first);
+          const end = pointToCanvas(second);
+          context.beginPath();
+          context.moveTo(start.x, start.y);
+          context.lineTo(end.x, end.y);
+          context.stroke();
+        });
 
-      context.shadowColor = "rgba(185, 255, 74, .85)";
-      context.shadowBlur = 12;
-      points.forEach((point, index) => {
-        if ((point.visibility ?? 1) < 0.55 || (index > 0 && index < 7)) return;
-        const current = pointToCanvas(point);
-        const radius = Math.max(3.5, Math.min(cssWidth, cssHeight) * 0.007);
-        context.beginPath();
-        context.arc(current.x, current.y, radius, 0, Math.PI * 2);
-        context.fillStyle = "#071006";
-        context.fill();
-        context.lineWidth = Math.max(2, radius * 0.48);
-        context.strokeStyle = "#b9ff4a";
-        context.stroke();
+        context.shadowColor = "rgba(185, 255, 74, .85)";
+        context.shadowBlur = 12;
+        points.forEach((point, index) => {
+          if ((point.visibility ?? 1) < 0.55 || (index > 0 && index < 7)) {
+            return;
+          }
+          const current = pointToCanvas(point);
+          const radius = Math.max(
+            3.5,
+            Math.min(cssWidth, cssHeight) * 0.007,
+          );
+          context.beginPath();
+          context.arc(current.x, current.y, radius, 0, Math.PI * 2);
+          context.fillStyle = "#071006";
+          context.fill();
+          context.lineWidth = Math.max(2, radius * 0.48);
+          context.strokeStyle = "#b9ff4a";
+          context.stroke();
+        });
+        context.restore();
       });
-      context.restore();
     },
     [],
   );
@@ -822,6 +955,7 @@ export default function Home() {
       if (
         video &&
         pose &&
+        !poseConfiguringRef.current &&
         (skeletonRef.current || personMaskEnabledRef.current) &&
         !processedObjectFrame &&
         video.readyState >= 2 &&
@@ -831,22 +965,21 @@ export default function Home() {
         try {
           const result = pose.detectForVideo(video, now);
           try {
-            const points = result.landmarks?.[0] as Landmark[] | undefined;
-            const personMask = result.segmentationMasks?.[0] as
-              | SegmentationMask
-              | undefined;
+            const poses = (result.landmarks || []) as Landmark[][];
+            const personMasks = (result.segmentationMasks ||
+              []) as SegmentationMask[];
             const personRecentlyConfirmed =
               !objectDetector ||
               now - lastPersonFoundRef.current <=
                 PERSON_CONFIRMATION_WINDOW_MS;
-            if (points?.length && personRecentlyConfirmed) {
-              drawPose(points, personMask, now);
+            if (poses.length && personRecentlyConfirmed) {
+              drawPoses(poses, personMasks, now);
               setStatus("tracking");
             } else {
               clearCanvas();
-              previousPointsRef.current = null;
+              previousPosesRef.current = [];
               setPoseName(
-                points?.length ? "ยังไม่ยืนยันว่าเป็นคน" : "ยังไม่พบคน",
+                poses.length ? "ยังไม่ยืนยันว่าเป็นคน" : "ยังไม่พบคน",
               );
               setStatus(
                 objectsEnabledRef.current &&
@@ -875,7 +1008,7 @@ export default function Home() {
 
     if (frameRef.current) cancelAnimationFrame(frameRef.current);
     frameRef.current = requestAnimationFrame(tick);
-  }, [clearCanvas, drawObjects, drawPose]);
+  }, [clearCanvas, drawObjects, drawPoses]);
 
   const openStream = useCallback(
     async (mode: FacingMode, deviceId?: string) => {
@@ -928,7 +1061,7 @@ export default function Home() {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
-    previousPointsRef.current = null;
+    previousPosesRef.current = [];
     fpsWindowRef.current = { started: 0, frames: 0 };
     lastObjectDetectRef.current = 0;
     lastObjectFoundRef.current = 0;
@@ -1025,7 +1158,7 @@ export default function Home() {
       setStatus("camera");
       try {
         await openStream(next);
-        previousPointsRef.current = null;
+        previousPosesRef.current = [];
         lastObjectDetectRef.current = 0;
         lastObjectFoundRef.current = 0;
         lastPersonFoundRef.current = 0;
@@ -1050,7 +1183,7 @@ export default function Home() {
     setError("");
     try {
       await openStream(nextFacing, nextDevice.deviceId);
-      previousPointsRef.current = null;
+      previousPosesRef.current = [];
       lastObjectDetectRef.current = 0;
       lastObjectFoundRef.current = 0;
       lastPersonFoundRef.current = 0;
@@ -1060,6 +1193,61 @@ export default function Home() {
       setError("เปิดเลนส์นี้ไม่สำเร็จ กรุณาลองเลนส์ถัดไป");
     }
   }, [clearCanvas, openStream, runDetection, videoDevices]);
+
+  const changeMaxPeople = useCallback(
+    async (requestedValue: number) => {
+      if (
+        poseConfiguringRef.current ||
+        !MAX_PEOPLE_OPTIONS.includes(
+          requestedValue as (typeof MAX_PEOPLE_OPTIONS)[number],
+        ) ||
+        requestedValue === maxPeopleRef.current
+      ) {
+        return;
+      }
+
+      const previousValue = maxPeopleRef.current;
+      maxPeopleRef.current = requestedValue;
+      setMaxPeople(requestedValue);
+      window.localStorage.setItem(
+        MAX_PEOPLE_STORAGE_KEY,
+        String(requestedValue),
+      );
+      previousPosesRef.current = [];
+      clearCanvas();
+
+      const pose = poseRef.current;
+      if (!pose) return;
+
+      poseConfiguringRef.current = true;
+      setPeopleUpdating(true);
+      setError("");
+      if (activeRef.current) {
+        setStatus("loading");
+        setPoseName(`กำลังปรับเป็นสูงสุด ${requestedValue} คน`);
+      }
+
+      try {
+        await pose.setOptions({ numPoses: requestedValue });
+        if (activeRef.current) {
+          setStatus("lost");
+          setPoseName(`กำลังมองหาคน สูงสุด ${requestedValue} คน`);
+        }
+      } catch {
+        maxPeopleRef.current = previousValue;
+        setMaxPeople(previousValue);
+        window.localStorage.setItem(
+          MAX_PEOPLE_STORAGE_KEY,
+          String(previousValue),
+        );
+        setError("เปลี่ยนจำนวนคนไม่สำเร็จ กรุณาลองใหม่");
+      } finally {
+        poseConfiguringRef.current = false;
+        setPeopleUpdating(false);
+      }
+    },
+    [clearCanvas],
+  );
 
   const enterCleanView = useCallback(async () => {
     setCleanView(true);
@@ -1250,6 +1438,25 @@ export default function Home() {
                 <Icon name="camera" />
                 <span>{cameraButtonLabel}</span>
               </button>
+              <label
+                className={`people-count-control ${peopleUpdating || status === "loading" ? "is-updating" : ""}`}
+              >
+                <Icon name="people" />
+                <select
+                  aria-label="เลือกจำนวนคนสูงสุดที่ต้องการตรวจจับ"
+                  disabled={peopleUpdating || status === "loading"}
+                  onChange={(event) => {
+                    void changeMaxPeople(Number(event.target.value));
+                  }}
+                  value={maxPeople}
+                >
+                  {MAX_PEOPLE_OPTIONS.map((count) => (
+                    <option key={count} value={count}>
+                      {count} คน
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button
                 aria-pressed={skeleton}
                 className={skeleton ? "is-on" : ""}
