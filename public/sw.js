@@ -1,4 +1,4 @@
-const CACHE_NAME = "hucam-overlay-toggles-v7";
+const CACHE_NAME = "hucam-multi-person-v8";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/icon.svg", "/icon-maskable.svg"];
 
 self.addEventListener("install", (event) => {
