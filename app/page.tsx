@@ -49,6 +49,14 @@ type PoseFrame = {
   mask?: SegmentationMask;
 };
 
+type PersonPalette = {
+  fill: [number, number, number];
+  edge: [number, number, number];
+  line: string;
+  joint: string;
+  shadow: string;
+};
+
 const POSE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
@@ -75,8 +83,66 @@ const PERSON_CONFIRMATION_SCORE = 0.45;
 const PERSON_CONFIRMATION_WINDOW_MS = 800;
 const PERSON_MASK_UPDATE_INTERVAL_MS = 100;
 const PERSON_MASK_THRESHOLD = 0.5;
-const MAX_PEOPLE_OPTIONS = [1, 2, 3, 4] as const;
+const MAX_PEOPLE_OPTIONS = [1, 2, 3, 4, 6, 8] as const;
 const MAX_PEOPLE_STORAGE_KEY = "hucam-max-people";
+const PERSON_PALETTES: PersonPalette[] = [
+  {
+    fill: [57, 231, 255],
+    edge: [185, 255, 74],
+    line: "#39e7ff",
+    joint: "#b9ff4a",
+    shadow: "rgba(57, 231, 255, .72)",
+  },
+  {
+    fill: [255, 99, 196],
+    edge: [255, 176, 226],
+    line: "#ff63c4",
+    joint: "#ffd1ed",
+    shadow: "rgba(255, 99, 196, .72)",
+  },
+  {
+    fill: [255, 180, 55],
+    edge: [255, 232, 115],
+    line: "#ffb437",
+    joint: "#fff0a6",
+    shadow: "rgba(255, 180, 55, .72)",
+  },
+  {
+    fill: [167, 139, 250],
+    edge: [224, 211, 255],
+    line: "#a78bfa",
+    joint: "#e8deff",
+    shadow: "rgba(167, 139, 250, .72)",
+  },
+  {
+    fill: [74, 222, 128],
+    edge: [193, 255, 214],
+    line: "#4ade80",
+    joint: "#c8ffda",
+    shadow: "rgba(74, 222, 128, .72)",
+  },
+  {
+    fill: [96, 165, 250],
+    edge: [205, 229, 255],
+    line: "#60a5fa",
+    joint: "#d4e8ff",
+    shadow: "rgba(96, 165, 250, .72)",
+  },
+  {
+    fill: [255, 138, 101],
+    edge: [255, 218, 205],
+    line: "#ff8a65",
+    joint: "#ffe0d6",
+    shadow: "rgba(255, 138, 101, .72)",
+  },
+  {
+    fill: [232, 121, 249],
+    edge: [251, 210, 255],
+    line: "#e879f9",
+    joint: "#fbd2ff",
+    shadow: "rgba(232, 121, 249, .72)",
+  },
+];
 
 const THAI_OBJECT_NAMES: Record<string, string> = {
   person: "คน",
@@ -671,6 +737,7 @@ export default function Home() {
         const nextMaskCanvases = poses.map((pose, poseIndex) => {
           const personMask = pose.mask;
           if (!personMask) return null;
+          const palette = PERSON_PALETTES[poseIndex % PERSON_PALETTES.length];
 
           const width = personMask.width;
           const height = personMask.height;
@@ -716,14 +783,14 @@ export default function Home() {
             const pixel = index * 4;
 
             if (onEdge) {
-              pixels[pixel] = 185;
-              pixels[pixel + 1] = 255;
-              pixels[pixel + 2] = 74;
+              pixels[pixel] = palette.edge[0];
+              pixels[pixel + 1] = palette.edge[1];
+              pixels[pixel + 2] = palette.edge[2];
               pixels[pixel + 3] = 235;
             } else {
-              pixels[pixel] = 57;
-              pixels[pixel + 1] = 231;
-              pixels[pixel + 2] = 255;
+              pixels[pixel] = palette.fill[0];
+              pixels[pixel + 1] = palette.fill[1];
+              pixels[pixel + 2] = palette.fill[2];
               pixels[pixel + 3] = Math.round(42 + Math.min(1, value) * 38);
             }
           }
@@ -765,13 +832,14 @@ export default function Home() {
         y: point.y * renderedHeight + offsetY,
       });
 
-      poses.forEach(({ points }) => {
+      poses.forEach(({ points }, poseIndex) => {
+        const palette = PERSON_PALETTES[poseIndex % PERSON_PALETTES.length];
         context.save();
         context.lineCap = "round";
         context.lineJoin = "round";
-        context.shadowColor = "rgba(57, 231, 255, .72)";
+        context.shadowColor = palette.shadow;
         context.shadowBlur = 10;
-        context.strokeStyle = "#39e7ff";
+        context.strokeStyle = palette.line;
         context.lineWidth = Math.max(
           3,
           Math.min(cssWidth, cssHeight) * 0.006,
@@ -795,7 +863,7 @@ export default function Home() {
           context.stroke();
         });
 
-        context.shadowColor = "rgba(185, 255, 74, .85)";
+        context.shadowColor = palette.shadow;
         context.shadowBlur = 12;
         points.forEach((point, index) => {
           if ((point.visibility ?? 1) < 0.55 || (index > 0 && index < 7)) {
@@ -811,7 +879,7 @@ export default function Home() {
           context.fillStyle = "#071006";
           context.fill();
           context.lineWidth = Math.max(2, radius * 0.48);
-          context.strokeStyle = "#b9ff4a";
+          context.strokeStyle = palette.joint;
           context.stroke();
         });
         context.restore();
