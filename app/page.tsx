@@ -57,34 +57,48 @@ type PersonPalette = {
   shadow: string;
 };
 
+type DetectionRate = "eco" | "balanced" | "fast";
+type ObjectGroup = "people" | "animals" | "vehicles" | "food" | "items";
+
 const POSE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
 const OBJECT_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-tasks/object_detector/efficientdet_lite0_uint8.tflite";
 
-const LIVING_OBJECT_CATEGORIES = [
-  "person",
-  "bird",
-  "cat",
-  "dog",
-  "horse",
-  "sheep",
-  "cow",
-  "elephant",
-  "bear",
-  "zebra",
-  "giraffe",
-  "potted plant",
-];
-const LIVING_OBJECT_CATEGORY_SET = new Set(LIVING_OBJECT_CATEGORIES);
-const OBJECT_DETECTION_INTERVAL_MS = 300;
+const OBJECT_GROUPS: Record<ObjectGroup, { label: string; categories: string[] }> = {
+  people: { label: "คน", categories: ["person"] },
+  animals: { label: "สัตว์และต้นไม้", categories: [
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "potted plant",
+  ] },
+  vehicles: { label: "ยานพาหนะ", categories: [
+    "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  ] },
+  food: { label: "อาหารและภาชนะ", categories: [
+    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich",
+    "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
+  ] },
+  items: { label: "ของใช้และเฟอร์นิเจอร์", categories: [
+    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "backpack", "umbrella", "handbag",
+    "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "chair", "couch", "bed", "dining table", "toilet", "tv", "laptop",
+    "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
+    "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+  ] },
+};
+const OBJECT_GROUP_KEYS = Object.keys(OBJECT_GROUPS) as ObjectGroup[];
+const DETECTION_RATES: Record<DetectionRate, { label: string; interval: number; note: string }> = {
+  eco: { label: "ประหยัด", interval: 450, note: "แบตอยู่นานกว่า" },
+  balanced: { label: "สมดุล", interval: 250, note: "แนะนำ" },
+  fast: { label: "เร็ว", interval: 120, note: "ใช้แบตมาก" },
+};
 const PERSON_CONFIRMATION_SCORE = 0.45;
 const PERSON_CONFIRMATION_WINDOW_MS = 800;
 const PERSON_MASK_UPDATE_INTERVAL_MS = 100;
 const PERSON_MASK_THRESHOLD = 0.5;
 const MAX_PEOPLE_OPTIONS = [1, 2, 3, 4, 6, 8] as const;
 const MAX_PEOPLE_STORAGE_KEY = "hucam-max-people";
+const SETTINGS_STORAGE_KEY = "hucam-detection-settings-v1";
 const PERSON_PALETTES: PersonPalette[] = [
   {
     fill: [57, 231, 255],
@@ -298,6 +312,7 @@ function Icon({
     | "box"
     | "silhouette"
     | "people"
+    | "settings"
     | "fullscreen";
   size?: number;
 }) {
@@ -354,6 +369,12 @@ function Icon({
         <circle cx="9" cy="7" r="2.5" />
         <circle cx="16.5" cy="8.5" r="2" />
         <path d="M3.8 19c.5-4 2.1-6.2 5.2-6.2s4.7 2.2 5.2 6.2M14.2 13.5c3.5-.8 5.4 1.2 6 4.5" />
+      </>
+    ),
+    settings: (
+      <>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-4v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
       </>
     ),
     fullscreen: (
@@ -496,6 +517,8 @@ export default function Home() {
   const skeletonRef = useRef(true);
   const personMaskEnabledRef = useRef(true);
   const objectsEnabledRef = useRef(true);
+  const detectionRateRef = useRef<DetectionRate>("balanced");
+  const selectedGroupsRef = useRef<Set<ObjectGroup>>(new Set(["people", "animals"]));
   const maxPeopleRef = useRef(1);
   const poseConfiguringRef = useRef(false);
   const previousPosesRef = useRef<Landmark[][]>([]);
@@ -508,12 +531,17 @@ export default function Home() {
   >([]);
   const lastPersonMaskUpdateRef = useRef(0);
   const fpsWindowRef = useRef({ started: 0, frames: 0 });
+  const lastCountUpdateRef = useRef(0);
 
   const [active, setActive] = useState(false);
   const [mirror, setMirror] = useState(true);
   const [skeleton, setSkeleton] = useState(true);
   const [personMaskEnabled, setPersonMaskEnabled] = useState(true);
   const [objectsEnabled, setObjectsEnabled] = useState(true);
+  const [detectionRate, setDetectionRate] = useState<DetectionRate>("balanced");
+  const [selectedGroups, setSelectedGroups] = useState<ObjectGroup[]>(["people", "animals"]);
+  const [showCounts, setShowCounts] = useState(true);
+  const [detectedCounts, setDetectedCounts] = useState<Record<string, number>>({});
   const [maxPeople, setMaxPeople] = useState(1);
   const [peopleUpdating, setPeopleUpdating] = useState(false);
   const [facing, setFacing] = useState<FacingMode>("user");
@@ -524,11 +552,34 @@ export default function Home() {
   const [fps, setFps] = useState(0);
   const [error, setError] = useState("");
   const [installOpen, setInstallOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [standalone, setStandalone] = useState(false);
   const [cleanView, setCleanView] = useState(false);
 
   useEffect(() => {
     const nav = navigator as Navigator & { standalone?: boolean };
+    let savedRate: DetectionRate = "balanced";
+    let savedGroups: ObjectGroup[] = ["people", "animals"];
+    let savedShowCounts = true;
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) || "null") as {
+        rate?: DetectionRate;
+        groups?: ObjectGroup[];
+        showCounts?: boolean;
+      } | null;
+      if (saved?.rate && DETECTION_RATES[saved.rate]) {
+        detectionRateRef.current = saved.rate;
+        savedRate = saved.rate;
+      }
+      const validGroups = saved?.groups?.filter((group) => OBJECT_GROUP_KEYS.includes(group));
+      if (validGroups?.length) {
+        selectedGroupsRef.current = new Set(validGroups);
+        savedGroups = validGroups;
+      }
+      if (typeof saved?.showCounts === "boolean") savedShowCounts = saved.showCounts;
+    } catch {
+      // Ignore invalid settings saved by an older version.
+    }
     const savedMaxPeople = Number(
       window.localStorage.getItem(MAX_PEOPLE_STORAGE_KEY),
     );
@@ -541,6 +592,9 @@ export default function Home() {
     }
     const standaloneTimer = window.setTimeout(() => {
       setMaxPeople(maxPeopleRef.current);
+      setDetectionRate(savedRate);
+      setSelectedGroups(savedGroups);
+      setShowCounts(savedShowCounts);
       setStandalone(
         window.matchMedia("(display-mode: standalone)").matches ||
           nav.standalone === true,
@@ -614,9 +668,8 @@ export default function Home() {
           },
           runningMode: "VIDEO",
           displayNamesLocale: "en",
-          maxResults: 12,
+          maxResults: 25,
           scoreThreshold: 0.3,
-          categoryAllowlist: LIVING_OBJECT_CATEGORIES,
         });
 
       if (isAppleMobileDevice()) {
@@ -988,21 +1041,26 @@ export default function Home() {
           skeletonRef.current ||
           personMaskEnabledRef.current) &&
         video.readyState >= 2 &&
-        now - lastObjectDetectRef.current >= OBJECT_DETECTION_INTERVAL_MS
+        now - lastObjectDetectRef.current >=
+          DETECTION_RATES[detectionRateRef.current].interval
       ) {
         lastObjectDetectRef.current = now;
         processedObjectFrame = true;
         try {
           const result = objectDetector.detectForVideo(video, now);
-          const livingDetections = (
-            result.detections as ObjectDetection[]
-          ).filter((detection) => {
+          const allDetections = result.detections as ObjectDetection[];
+          const enabledCategories = new Set(
+            [...selectedGroupsRef.current].flatMap(
+              (group) => OBJECT_GROUPS[group].categories,
+            ),
+          );
+          const selectedDetections = allDetections.filter((detection) => {
             const name =
               detection.categories?.[0]?.categoryName?.toLowerCase() || "";
-            return LIVING_OBJECT_CATEGORY_SET.has(name);
+            return enabledCategories.has(name);
           });
-          drawObjects(livingDetections);
-          const personConfirmed = livingDetections.some((detection) => {
+          drawObjects(selectedDetections);
+          const personConfirmed = allDetections.some((detection) => {
             const category = detection.categories?.[0];
             return (
               category?.categoryName?.toLowerCase() === "person" &&
@@ -1011,7 +1069,17 @@ export default function Home() {
           });
           if (personConfirmed) lastPersonFoundRef.current = now;
 
-          if (livingDetections.length > 0) {
+          if (now - lastCountUpdateRef.current >= 500) {
+            const nextCounts: Record<string, number> = {};
+            selectedDetections.forEach((detection) => {
+              const name = detection.categories?.[0]?.categoryName?.toLowerCase();
+              if (name) nextCounts[name] = (nextCounts[name] || 0) + 1;
+            });
+            setDetectedCounts(nextCounts);
+            lastCountUpdateRef.current = now;
+          }
+
+          if (selectedDetections.length > 0) {
             lastObjectFoundRef.current = now;
             if (objectsEnabledRef.current) setStatus("object");
           }
@@ -1137,6 +1205,7 @@ export default function Home() {
     clearCanvas();
     clearObjectCanvas();
     setFps(0);
+    setDetectedCounts({});
     setPoseName("รอเริ่มตรวจจับ");
     setStatus("idle");
     setActive(false);
@@ -1367,6 +1436,19 @@ export default function Home() {
         ? "กล้องหน้า"
         : "กล้องหลัง";
 
+  const saveSettings = useCallback(
+    (rate: DetectionRate, groups: ObjectGroup[], counts: boolean) => {
+      window.localStorage.setItem(
+        SETTINGS_STORAGE_KEY,
+        JSON.stringify({ rate, groups, showCounts: counts }),
+      );
+    },
+    [],
+  );
+  const countEntries = Object.entries(detectedCounts).sort(
+    ([, first], [, second]) => second - first,
+  );
+
   return (
     <main className={`app-shell ${cleanView ? "is-clean-view" : ""}`}>
       <header className="app-header">
@@ -1459,6 +1541,17 @@ export default function Home() {
           {error && (
             <div className="error-toast" role="alert">
               {error}
+            </div>
+          )}
+
+          {active && showCounts && countEntries.length > 0 && (
+            <div className="detection-counts" aria-live="polite">
+              {countEntries.map(([name, count]) => (
+                <span key={name}>{THAI_OBJECT_NAMES[name] || name} {count}</span>
+              ))}
+              <strong>
+                รวม {countEntries.reduce((sum, [, count]) => sum + count, 0)}
+              </strong>
             </div>
           )}
 
@@ -1572,7 +1665,11 @@ export default function Home() {
                 type="button"
               >
                 <Icon name="box" />
-                <span>สิ่งมีชีวิต</span>
+                <span>วัตถุ</span>
+              </button>
+              <button onClick={() => setSettingsOpen(true)} type="button">
+                <Icon name="settings" />
+                <span>ตั้งค่า</span>
               </button>
             </div>
           </div>
@@ -1627,6 +1724,99 @@ export default function Home() {
               type="button"
             >
               เข้าใจแล้ว
+            </button>
+          </section>
+        </div>
+      )}
+
+      {settingsOpen && (
+        <div
+          aria-labelledby="settings-title"
+          aria-modal="true"
+          className="modal-backdrop"
+          role="dialog"
+        >
+          <section className="install-card settings-card">
+            <button
+              aria-label="ปิด"
+              className="modal-close"
+              onClick={() => setSettingsOpen(false)}
+              type="button"
+            >
+              <Icon name="close" />
+            </button>
+            <span className="install-icon">
+              <Icon name="settings" size={32} />
+            </span>
+            <h2 id="settings-title">ตั้งค่าการตรวจจับ</h2>
+
+            <fieldset className="settings-section">
+              <legend>ความเร็ว</legend>
+              <div className="rate-options">
+                {(Object.keys(DETECTION_RATES) as DetectionRate[]).map((rate) => (
+                  <button
+                    className={detectionRate === rate ? "is-selected" : ""}
+                    key={rate}
+                    onClick={() => {
+                      detectionRateRef.current = rate;
+                      setDetectionRate(rate);
+                      saveSettings(rate, selectedGroups, showCounts);
+                    }}
+                    type="button"
+                  >
+                    <strong>{DETECTION_RATES[rate].label}</strong>
+                    <small>{DETECTION_RATES[rate].note}</small>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset className="settings-section">
+              <legend>สิ่งที่ต้องการตรวจจับ</legend>
+              <div className="group-options">
+                {OBJECT_GROUP_KEYS.map((group) => (
+                  <label key={group}>
+                    <input
+                      checked={selectedGroups.includes(group)}
+                      onChange={() => {
+                        const next = selectedGroups.includes(group)
+                          ? selectedGroups.filter((item) => item !== group)
+                          : [...selectedGroups, group];
+                        if (!next.length) return;
+                        selectedGroupsRef.current = new Set(next);
+                        setSelectedGroups(next);
+                        saveSettings(detectionRate, next, showCounts);
+                        clearObjectCanvas();
+                      }}
+                      type="checkbox"
+                    />
+                    <span>{OBJECT_GROUPS[group].label}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <label className="count-setting">
+              <span>
+                <strong>แสดงจำนวน</strong>
+                <small>มุมล่างซ้ายของภาพ</small>
+              </span>
+              <input
+                checked={showCounts}
+                onChange={(event) => {
+                  const next = event.target.checked;
+                  setShowCounts(next);
+                  saveSettings(detectionRate, selectedGroups, next);
+                }}
+                type="checkbox"
+              />
+            </label>
+            <button
+              className="modal-done"
+              onClick={() => setSettingsOpen(false)}
+              type="button"
+            >
+              เสร็จแล้ว
             </button>
           </section>
         </div>

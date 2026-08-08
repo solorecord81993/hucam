@@ -74,6 +74,11 @@ button:focus-visible {
   display: none;
 }
 
+.app-shell.is-clean-view .detection-counts {
+  bottom: max(14px, env(safe-area-inset-bottom));
+  left: max(14px, env(safe-area-inset-left));
+}
+
 .app-shell.is-clean-view .camera-shell {
   height: 100dvh;
   padding: 0;
@@ -497,7 +502,28 @@ button:focus-visible {
 .control-row {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.detection-counts {
+  backdrop-filter: blur(10px);
+  background: rgba(7, 10, 12, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  bottom: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 3px 9px;
+  left: 18px;
+  max-width: min(52%, 360px);
+  padding: 7px 9px;
+  position: absolute;
+  z-index: 4;
+}
+
+.detection-counts strong {
+  color: var(--lime);
 }
 
 .control-row button,
@@ -665,6 +691,94 @@ button:focus-visible {
   margin-top: 24px;
   min-height: 52px;
   width: 100%;
+}
+
+.settings-card {
+  max-height: min(760px, calc(100dvh - 28px));
+  overflow-y: auto;
+}
+
+.settings-section {
+  border: 0;
+  margin: 0 0 20px;
+  padding: 0;
+}
+
+.settings-section legend {
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.rate-options {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.rate-options button {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: #e4e9ea;
+  min-height: 58px;
+  padding: 7px;
+}
+
+.rate-options button.is-selected {
+  background: rgba(57, 231, 255, 0.1);
+  border-color: var(--cyan);
+}
+
+.rate-options strong,
+.rate-options small {
+  display: block;
+}
+
+.rate-options small {
+  color: var(--muted);
+  font-size: 9px;
+  margin-top: 3px;
+}
+
+.group-options {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.group-options label,
+.count-setting {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: flex;
+  gap: 9px;
+  min-height: 48px;
+  padding: 10px 12px;
+}
+
+.group-options input,
+.count-setting input {
+  accent-color: var(--lime);
+  height: 20px;
+  width: 20px;
+}
+
+.count-setting {
+  justify-content: space-between;
+}
+
+.count-setting span {
+  display: grid;
+}
+
+.count-setting small {
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 2px;
 }
 
 @keyframes pulse {
